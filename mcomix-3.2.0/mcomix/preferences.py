@@ -113,6 +113,19 @@ prefs = {
     'animation mode': constants.ANIMATION_NORMAL,
     'double page autoresize': constants.DOUBLE_PAGE_AUTORESIZE_SIZE,
     'space between two pages': 2,
+    'ai text endpoint': 'https://api.openai.com/v1/chat/completions',
+    'ai text model': '',
+    'ai text timeout': 180,
+    'ai image endpoint': 'https://api.openai.com/v1/images/edits',
+    'ai image model': '',
+    'ai image timeout': 180,
+}
+
+# Secrets are deliberately kept out of preferences.conf.  This file is
+# written with owner-only permissions by write_preferences_file().
+credentials = {
+    'ai text api key': '',
+    'ai image api key': '',
 }
 
 
@@ -173,6 +186,16 @@ def read_preferences_file() -> None:
             if key in prefs:
                 prefs[key] = saved_prefs[key]
 
+    try:
+        with open(constants.AI_CREDENTIAL_PATH, 'r') as credentials_file:
+            saved_credentials = json.load(credentials_file)
+        if isinstance(saved_credentials, dict):
+            for key in saved_credentials:
+                if key in credentials and isinstance(saved_credentials[key], str):
+                    credentials[key] = saved_credentials[key]
+    except (OSError, ValueError, TypeError):
+        pass
+
 def write_preferences_file():
     """Write preference data to disk."""
     # TODO: it might be better to save only those options that were (ever)
@@ -184,5 +207,16 @@ def write_preferences_file():
     # dict or a list.  Adding an extra init line sounds bad too.
     json.dump(prefs, config_file, indent=2)
     config_file.close()
+
+    credential_fd = os.open(constants.AI_CREDENTIAL_PATH,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(constants.AI_CREDENTIAL_PATH, 0o600)
+        with os.fdopen(credential_fd, 'w') as credentials_file:
+            credential_fd = None
+            json.dump(credentials, credentials_file, indent=2)
+    finally:
+        if credential_fd is not None:
+            os.close(credential_fd)
 
 # vim: expandtab:sw=4:ts=4

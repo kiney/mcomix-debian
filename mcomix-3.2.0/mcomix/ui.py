@@ -201,6 +201,20 @@ class MainUI(Gtk.UIManager):
             ('library', 'mcomix-library', _('_Library...'),
                 None, None, library_main_dialog.open_dialog)], window)
 
+        self._actiongroup.add_actions([
+            ('ai_ask_image', Gtk.STOCK_DIALOG_QUESTION,
+                _('_Ask AI about image...'), None,
+                _('Ask a question about the current image.'),
+                window.ai.ask_about_image),
+            ('ai_transform_image', Gtk.STOCK_CONVERT,
+                _('_Transform image with AI...'), None,
+                _('Transform the current image using an AI service.'),
+                window.ai.transform_image),
+            ('ai_reset_image', Gtk.STOCK_UNDO,
+                _('_Reset AI transformation'), None,
+                _('Restore the original image for the current page.'),
+                window.ai.reset_transformation)])
+
         # fix some gtk magic: removing unreqired accelerators
         Gtk.AccelMap.change_entry('<Actions>/mcomix-main/%s' % 'close', 0, 0, True)
 
@@ -228,6 +242,9 @@ class MainUI(Gtk.UIManager):
                 <toolitem action="manga_mode" />
                 <separator />
                 <toolitem action="lens" />
+                <separator />
+                <toolitem action="ai_ask_image" />
+                <toolitem action="ai_transform_image" />
             </toolbar>
 
             <menubar name="Menu">
@@ -305,6 +322,10 @@ class MainUI(Gtk.UIManager):
                 <menu action="menu_bookmarks">
                 </menu>
                 <menu action="menu_tools">
+                    <menuitem action="ai_ask_image" />
+                    <menuitem action="ai_transform_image" />
+                    <menuitem action="ai_reset_image" />
+                    <separator />
                     <menuitem action="enhance_image" />
                     <menu action="menu_transform">
                         <menuitem action="rotate_90" />
@@ -460,6 +481,7 @@ class MainUI(Gtk.UIManager):
                    'previous_directory',
                    'keep_transformation',
                    'enhance_image')
+        general += ('ai_ask_image', 'ai_transform_image', 'ai_reset_image')
 
         comment = ('comments',)
 

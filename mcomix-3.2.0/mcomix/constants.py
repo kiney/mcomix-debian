@@ -20,6 +20,7 @@ LIBRARY_DATABASE_PATH = os.path.join(DATA_DIR, 'library.db')
 LASTPAGE_DATABASE_PATH = os.path.join(DATA_DIR, 'lastreadpage.db')
 LIBRARY_COVERS_PATH = os.path.join(DATA_DIR, 'library_covers')
 PREFERENCE_PATH = os.path.join(CONFIG_DIR, 'preferences.conf')
+AI_CREDENTIAL_PATH = os.path.join(CONFIG_DIR, 'ai-credentials.conf')
 KEYBINDINGS_CONF_PATH = os.path.join(CONFIG_DIR, 'keybindings.conf')
 
 BOOKMARK_PICKLE_PATH = os.path.join(DATA_DIR, 'bookmarks.pickle')

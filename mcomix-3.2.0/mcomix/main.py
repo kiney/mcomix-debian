@@ -30,6 +30,7 @@ from mcomix import osd
 from mcomix import keybindings
 from mcomix import zoom
 from mcomix import bookmark_backend
+from mcomix import ai_dialog
 from mcomix import message_dialog
 from mcomix import callback
 from mcomix.library import backend, main_dialog
@@ -103,6 +104,7 @@ class MainWindow(Gtk.Window):
         self.lens = lens.MagnifyingLens(self)
         self.osd = osd.OnScreenDisplay(self)
         self.zoom = zoom.ZoomModel()
+        self.ai = ai_dialog.AIHandler(self)
         self.uimanager = ui.MainUI(self)
         self.menubar = self.uimanager.get_widget('/Menu')
         self.toolbar = self.uimanager.get_widget('/Tool')
@@ -995,6 +997,10 @@ class MainWindow(Gtk.Window):
             if not file_path:
                 return
             file_name = os.path.split(file_path)[-1]
+            page = self.imagehandler.get_current_page() + i
+            override = self.imagehandler.get_page_override(page)
+            if override is not None:
+                file_name = os.path.splitext(file_name)[0] + '_ai.png'
 
             if self.filehandler.archive_type is not None:
                 # Prepend the archive base name to the filename being displayed
@@ -1025,7 +1031,12 @@ class MainWindow(Gtk.Window):
                 if target:
                     target = i18n.to_unicode(target)
                     try:
-                        shutil.copy2(file_path, target)
+                        if override is None:
+                            shutil.copy2(file_path, target)
+                        else:
+                            image_tools.pixbuf_to_pil(
+                                image_tools.static_image(override)).save(
+                                    target, format='PNG')
                     except Exception as e:
                         log.warning(e)
 

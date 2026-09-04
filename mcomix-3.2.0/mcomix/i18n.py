@@ -15,6 +15,7 @@ except ImportError:
 from mcomix import preferences
 from mcomix import portability
 from mcomix import constants
+from mcomix import local_translations
 
 # Translation instance to enable other modules to use
 # functions other than the global _() if necessary
@@ -88,6 +89,7 @@ def install_gettext(force_lang=None):
     domain = constants.APPNAME.lower()
 
     # Search for .mo files manually, since gettext doesn't support packaged resources
+    selected_lang = lang
     for lang in lang_identifiers:
         resource = os.path.join('messages', lang, 'LC_MESSAGES', '%s.mo' % domain)
         try:
@@ -97,9 +99,14 @@ def install_gettext(force_lang=None):
         else:
             fp = io.BytesIO(translation_content)
             translation = gettext.GNUTranslations(fp)
+            selected_lang = lang
             break
     else:
         translation = gettext.NullTranslations()
+
+    local_translation = local_translations.get_translation(selected_lang)
+    if local_translation is not None:
+        translation.add_fallback(local_translation)
 
     global _translation
     _translation = translation

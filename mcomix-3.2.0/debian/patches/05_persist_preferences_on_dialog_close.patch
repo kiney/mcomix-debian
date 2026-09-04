@@ -1,0 +1,99 @@
+Description: Persist preferences when the preferences dialog closes
+ Write changed settings immediately when the preferences dialog is closed,
+ instead of relying solely on a later clean application shutdown. This avoids
+ losing API configuration when the running process is replaced or terminated.
+Author: Jannik Winkel <jannik.winkel@kiney.de>
+Forwarded: no
+Last-Update: 2026-09-04
+
+Index: mcomix-3.2.0/mcomix/preferences_dialog.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/preferences_dialog.py	2026-09-04 19:39:57.945489565 +0200
++++ mcomix-3.2.0/mcomix/preferences_dialog.py	2026-09-04 19:40:23.882375587 +0200
+@@ -6,7 +6,7 @@
+ from gi.repository import Gdk, GdkPixbuf, Gtk, GObject
+ 
+ from mcomix.preferences import credentials, prefs
+-from mcomix import preferences_page
++from mcomix import preferences, preferences_page
+ from mcomix import image_tools
+ from mcomix import constants
+ from mcomix import message_dialog
+@@ -404,6 +404,7 @@
+ 
+     def _response(self, dialog, response):
+         if response == Gtk.ResponseType.CLOSE:
++            preferences.write_preferences_file()
+             _close_dialog()
+ 
+         elif response == constants.RESPONSE_REVERT_TO_DEFAULT:
+@@ -421,6 +422,7 @@
+ 
+         else:
+             # Other responses close the dialog, e.g. clicking the X icon on the dialog.
++            preferences.write_preferences_file()
+             _close_dialog()
+ 
+     def _create_language_control(self):
+Index: mcomix-3.2.0/tests/test_ai_preferences.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/test_ai_preferences.py	2026-09-04 19:40:23.982379002 +0200
+@@ -0,0 +1,57 @@
++import os
++import stat
++import tempfile
++import unittest
++
++from mcomix import constants, preferences
++
++
++class AIPreferencesPersistenceTest(unittest.TestCase):
++    def test_ai_settings_survive_write_and_reload(self):
++        pref_keys = ("ai text endpoint", "ai text model",
++                     "ai image endpoint", "ai image model")
++        credential_keys = ("ai text api key", "ai image api key")
++        original_prefs = {key: preferences.prefs[key] for key in pref_keys}
++        original_credentials = {
++            key: preferences.credentials[key] for key in credential_keys
++        }
++        original_paths = (constants.PREFERENCE_PATH,
++                          constants.AI_CREDENTIAL_PATH)
++
++        try:
++            with tempfile.TemporaryDirectory() as directory:
++                constants.PREFERENCE_PATH = os.path.join(directory, "preferences.conf")
++                constants.AI_CREDENTIAL_PATH = os.path.join(
++                    directory, "ai-credentials.conf")
++                expected_prefs = {
++                    "ai text endpoint": "https://text.example.test/v1",
++                    "ai text model": "vision-test",
++                    "ai image endpoint": "https://image.example.test/v1",
++                    "ai image model": "image-test",
++                }
++                expected_credentials = {
++                    "ai text api key": "text-test-key",
++                    "ai image api key": "image-test-key",
++                }
++                preferences.prefs.update(expected_prefs)
++                preferences.credentials.update(expected_credentials)
++                preferences.write_preferences_file()
++
++                preferences.prefs.update({key: "" for key in pref_keys})
++                preferences.credentials.update({key: "" for key in credential_keys})
++                preferences.read_preferences_file()
++
++                for key, value in expected_prefs.items():
++                    self.assertEqual(preferences.prefs[key], value)
++                for key, value in expected_credentials.items():
++                    self.assertEqual(preferences.credentials[key], value)
++                mode = stat.S_IMODE(os.stat(constants.AI_CREDENTIAL_PATH).st_mode)
++                self.assertEqual(mode, 0o600)
++        finally:
++            constants.PREFERENCE_PATH, constants.AI_CREDENTIAL_PATH = original_paths
++            preferences.prefs.update(original_prefs)
++            preferences.credentials.update(original_credentials)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,1035 @@
+Description: Add OpenAI-compatible image question and transformation tools
+ Add two direct Tools menu actions and matching toolbar buttons for sending
+ the current page to independently configured text and image endpoints.
+ Keep generated images as reversible, session-only page overrides.
+Author: Jannik Winkel <jannik.winkel@kiney.de>
+Forwarded: no
+Last-Update: 2026-09-04
+
+Index: mcomix-3.2.0/mcomix/ai_client.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/mcomix/ai_client.py	2026-09-04 19:35:29.000000000 +0200
+@@ -0,0 +1,176 @@
++"""Client for OpenAI-compatible vision and image-edit endpoints."""
++
++import base64
++import binascii
++import io
++from typing import Any, Dict
++from urllib.parse import urlparse
++
++import requests
++from PIL import Image, UnidentifiedImageError
++
++from mcomix.i18n import _
++
++
++MAX_RESPONSE_BYTES = 64 * 1024 * 1024
++MAX_ERROR_TEXT = 1000
++
++
++class AIError(Exception):
++    """An error suitable for display to the user."""
++
++
++def _headers(api_key: str) -> Dict[str, str]:
++    headers = {"Accept": "application/json"}
++    if api_key:
++        headers["Authorization"] = "Bearer %s" % api_key
++    return headers
++
++
++def _error_message(response: requests.Response) -> str:
++    try:
++        payload = response.json()
++        error = payload.get("error", payload)
++        if isinstance(error, dict):
++            message = error.get("message")
++            if message:
++                return str(message)[:MAX_ERROR_TEXT]
++    except (ValueError, AttributeError):
++        pass
++    text = (response.text or response.reason or "").strip()
++    return text[:MAX_ERROR_TEXT]
++
++
++def _check_response(response: requests.Response) -> None:
++    if not response.ok:
++        message = _error_message(response)
++        if message:
++            raise AIError("HTTP %s: %s" % (response.status_code, message))
++        raise AIError("HTTP %s" % response.status_code)
++
++
++def _json(response: requests.Response) -> Dict[str, Any]:
++    _check_response(response)
++    if len(response.content) > MAX_RESPONSE_BYTES:
++        raise AIError(_("The API response is too large."))
++    try:
++        payload = response.json()
++    except ValueError as error:
++        raise AIError(_("The API returned invalid JSON.")) from error
++    if not isinstance(payload, dict):
++        raise AIError(_("The API returned an unexpected response."))
++    return payload
++
++
++def _request_error(error: requests.RequestException) -> AIError:
++    if isinstance(error, requests.Timeout):
++        return AIError(_("The API request timed out."))
++    return AIError(_("The API request failed: %s") % error)
++
++
++def ask_about_image(endpoint: str, api_key: str, model: str,
++                    prompt: str, image_png: bytes, timeout: int) -> str:
++    """Send a PNG and prompt to a Chat Completions compatible endpoint."""
++    image_url = "data:image/png;base64,%s" % base64.b64encode(
++        image_png).decode("ascii")
++    payload = {
++        "model": model,
++        "messages": [{
++            "role": "user",
++            "content": [
++                {"type": "text", "text": prompt},
++                {"type": "image_url", "image_url": {
++                    "url": image_url,
++                    "detail": "high",
++                }},
++            ],
++        }],
++    }
++    try:
++        response = requests.post(endpoint, headers=_headers(api_key),
++                                 json=payload, timeout=(10, timeout))
++    except requests.RequestException as error:
++        raise _request_error(error) from error
++
++    data = _json(response)
++    try:
++        content = data["choices"][0]["message"]["content"]
++    except (KeyError, IndexError, TypeError) as error:
++        raise AIError(_("The API response does not contain a text answer.")) from error
++
++    if isinstance(content, str):
++        answer = content
++    elif isinstance(content, list):
++        answer = "\n".join(
++            part.get("text", "") for part in content
++            if isinstance(part, dict) and part.get("type") in ("text", "output_text")
++        )
++    else:
++        answer = ""
++    if not answer.strip():
++        raise AIError(_("The API response does not contain a text answer."))
++    return answer.strip()
++
++
++def _download_image(url: str, timeout: int) -> bytes:
++    parsed = urlparse(url)
++    if parsed.scheme not in ("http", "https"):
++        raise AIError(_("The API returned an unsupported image URL."))
++    try:
++        response = requests.get(url, stream=True, timeout=(10, timeout))
++        _check_response(response)
++        chunks = []
++        size = 0
++        for chunk in response.iter_content(64 * 1024):
++            size += len(chunk)
++            if size > MAX_RESPONSE_BYTES:
++                raise AIError(_("The returned image is too large."))
++            chunks.append(chunk)
++        return b"".join(chunks)
++    except requests.RequestException as error:
++        raise _request_error(error) from error
++
++
++def _validate_image(image_data: bytes) -> bytes:
++    if not image_data or len(image_data) > MAX_RESPONSE_BYTES:
++        raise AIError(_("The returned image is empty or too large."))
++    try:
++        with Image.open(io.BytesIO(image_data)) as image:
++            image.load()
++            if image.width < 1 or image.height < 1:
++                raise AIError(_("The API returned an invalid image."))
++    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
++        raise AIError(_("The API returned invalid image data.")) from error
++    return image_data
++
++
++def transform_image(endpoint: str, api_key: str, model: str,
++                    prompt: str, image_png: bytes, timeout: int) -> bytes:
++    """Send a PNG to an Images Edits compatible endpoint and return an image."""
++    files = {"image": ("mcomix-page.png", image_png, "image/png")}
++    form = {"model": model, "prompt": prompt}
++    try:
++        response = requests.post(endpoint, headers=_headers(api_key),
++                                 data=form, files=files,
++                                 timeout=(10, timeout))
++    except requests.RequestException as error:
++        raise _request_error(error) from error
++
++    data = _json(response)
++    try:
++        result = data["data"][0]
++    except (KeyError, IndexError, TypeError) as error:
++        raise AIError(_("The API response does not contain an image.")) from error
++
++    if not isinstance(result, dict):
++        raise AIError(_("The API response does not contain an image."))
++    if result.get("b64_json"):
++        try:
++            image_data = base64.b64decode(result["b64_json"], validate=True)
++        except (binascii.Error, ValueError, TypeError) as error:
++            raise AIError(_("The API returned invalid base64 image data.")) from error
++    elif result.get("url"):
++        image_data = _download_image(result["url"], timeout)
++    else:
++        raise AIError(_("The API response does not contain an image."))
++    return _validate_image(image_data)
+Index: mcomix-3.2.0/mcomix/ai_dialog.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/mcomix/ai_dialog.py	2026-09-04 19:35:29.000000000 +0200
+@@ -0,0 +1,260 @@
++"""Dialogs and controller for AI-assisted image actions."""
++
++import io
++import os
++import threading
++
++from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
++
++from mcomix import ai_client, image_tools, message_dialog, preferences_dialog
++from mcomix.i18n import _
++from mcomix.preferences import credentials, prefs
++
++
++class PromptDialog(Gtk.Dialog):
++    def __init__(self, window, title, description):
++        super().__init__(title, window,
++            Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
++            (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
++             _('_Send'), Gtk.ResponseType.OK))
++        self.set_default_size(560, 300)
++        self.set_default_response(Gtk.ResponseType.OK)
++        content = self.get_content_area()
++        content.set_border_width(12)
++        content.set_spacing(8)
++        label = Gtk.Label(label=description)
++        label.set_alignment(0, 0.5)
++        label.set_line_wrap(True)
++        content.pack_start(label, False, False, 0)
++        scrolled = Gtk.ScrolledWindow()
++        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
++        self.text_view = Gtk.TextView()
++        self.text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
++        self.text_view.connect('key-press-event', self._key_press_event)
++        scrolled.add(self.text_view)
++        content.pack_start(scrolled, True, True, 0)
++        self.show_all()
++        self.text_view.grab_focus()
++
++    def _key_press_event(self, _widget, event):
++        enter_keys = (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter)
++        if (event.state & Gdk.ModifierType.CONTROL_MASK and
++                event.keyval in enter_keys):
++            self.response(Gtk.ResponseType.OK)
++            return True
++        return False
++
++    def get_prompt(self):
++        text_buffer = self.text_view.get_buffer()
++        return text_buffer.get_text(
++            text_buffer.get_start_iter(), text_buffer.get_end_iter(), True).strip()
++
++
++class ProgressDialog(Gtk.Dialog):
++    def __init__(self, window, title, cancel_callback):
++        super().__init__(title, window, Gtk.DialogFlags.DESTROY_WITH_PARENT,
++            (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL))
++        self.set_modal(False)
++        self.set_deletable(True)
++        box = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 12)
++        box.set_border_width(16)
++        spinner = Gtk.Spinner()
++        spinner.start()
++        box.pack_start(spinner, False, False, 0)
++        box.pack_start(Gtk.Label(label=_('Waiting for the API response…')),
++                       False, False, 0)
++        self.get_content_area().pack_start(box, True, True, 0)
++        self.connect('response', lambda *_: cancel_callback())
++        self.show_all()
++
++
++class AIHandler:
++    def __init__(self, window):
++        self._window = window
++        self._job_id = 0
++        self._busy = False
++        self._progress = None
++
++    def ask_about_image(self, *args):
++        self._start('text')
++
++    def transform_image(self, *args):
++        self._start('image')
++
++    def reset_transformation(self, *args):
++        if self._window.imagehandler.clear_page_override():
++            self._window.thumbnailsidebar.load_thumbnails()
++            self._window.draw_image()
++        else:
++            self._show_info(_('No AI transformation'),
++                _('The current page has no AI-generated image to reset.'))
++
++    def _configuration(self, mode):
++        prefix = 'ai text' if mode == 'text' else 'ai image'
++        environment_key = ('MCOMIX_AI_TEXT_API_KEY' if mode == 'text'
++                           else 'MCOMIX_AI_IMAGE_API_KEY')
++        return {
++            'endpoint': prefs[prefix + ' endpoint'].strip(),
++            'api_key': os.environ.get(environment_key,
++                credentials[prefix + ' api key']).strip(),
++            'model': prefs[prefix + ' model'].strip(),
++            'timeout': prefs[prefix + ' timeout'],
++        }
++
++    def _start(self, mode):
++        if self._busy or not self._window.imagehandler.page_is_available():
++            return
++        config = self._configuration(mode)
++        if not config['endpoint'] or not config['model']:
++            self._show_configuration_error()
++            return
++
++        if mode == 'text':
++            title = _('Ask AI about image')
++            description = _('Enter a question about the current image:')
++        else:
++            title = _('Transform image with AI')
++            description = _('Describe how the current image should be transformed:')
++        dialog = PromptDialog(self._window, title, description)
++        response = dialog.run()
++        prompt = dialog.get_prompt()
++        dialog.destroy()
++        if response != Gtk.ResponseType.OK:
++            return
++        if not prompt:
++            self._show_info(_('Prompt required'), _('Please enter a prompt.'))
++            return
++
++        page = self._window.imagehandler.get_current_page()
++        page_path = self._window.imagehandler.get_path_to_page(page)
++        generation = self._window.imagehandler.get_generation()
++        pixbuf = self._window.imagehandler.get_pixbufs(1)[0]
++        if image_tools.is_animation(pixbuf):
++            pixbuf = image_tools.static_image(pixbuf)
++        output = io.BytesIO()
++        image_tools.pixbuf_to_pil(pixbuf).save(output, 'PNG')
++        image_png = output.getvalue()
++
++        self._job_id += 1
++        job_id = self._job_id
++        self._busy = True
++        self._set_action_sensitivity(False)
++        self._progress = ProgressDialog(self._window, title,
++            lambda: self._cancel(job_id))
++        thread = threading.Thread(target=self._request,
++            args=(job_id, mode, config, prompt, image_png, page, page_path,
++                  generation),
++            name='mcomix-ai')
++        thread.daemon = True
++        thread.start()
++
++    def _request(self, job_id, mode, config, prompt, image_png, page, page_path,
++                 generation):
++        try:
++            if mode == 'text':
++                result = ai_client.ask_about_image(
++                    config['endpoint'], config['api_key'], config['model'],
++                    prompt, image_png, config['timeout'])
++            else:
++                result = ai_client.transform_image(
++                    config['endpoint'], config['api_key'], config['model'],
++                    prompt, image_png, config['timeout'])
++            error = None
++        except Exception as caught:
++            result = None
++            error = caught
++        GLib.idle_add(self._finished, job_id, mode, result, error,
++                      page, page_path, generation)
++
++    def _finished(self, job_id, mode, result, error, page, page_path,
++                  generation):
++        if job_id != self._job_id:
++            return False
++        if self._progress is not None:
++            self._progress.destroy()
++            self._progress = None
++        self._busy = False
++        self._set_action_sensitivity(True)
++        if error is not None:
++            self._show_error(str(error))
++        elif mode == 'text':
++            self._show_text_result(result)
++        else:
++            try:
++                loader = GdkPixbuf.PixbufLoader()
++                loader.write(result)
++                loader.close()
++                pixbuf = loader.get_pixbuf()
++                if pixbuf is None:
++                    raise ValueError(_('The API returned invalid image data.'))
++                applied = self._window.imagehandler.set_page_override(
++                    page, pixbuf, expected_path=page_path,
++                    expected_generation=generation)
++                if not applied:
++                    self._show_info(_('Image is no longer open'),
++                        _('The result was discarded because its source image is no longer open.'))
++                else:
++                    self._window.draw_image()
++            except Exception as caught:
++                self._show_error(str(caught))
++        return False
++
++    def _cancel(self, job_id):
++        if job_id != self._job_id:
++            return
++        self._job_id += 1
++        if self._progress is not None:
++            self._progress.destroy()
++            self._progress = None
++        self._busy = False
++        self._set_action_sensitivity(True)
++
++    def _set_action_sensitivity(self, sensitive):
++        if sensitive:
++            self._window.uimanager.set_sensitivities()
++        else:
++            for name in ('ai_ask_image', 'ai_transform_image'):
++                self._window.actiongroup.get_action(name).set_sensitive(False)
++
++    def _show_configuration_error(self):
++        dialog = message_dialog.MessageDialog(self._window,
++            Gtk.DialogFlags.MODAL, Gtk.MessageType.ERROR, Gtk.ButtonsType.NONE)
++        dialog.set_text(_('AI service is not configured'),
++            _('Set an endpoint URL and model in Preferences → AI/API.'))
++        dialog.add_button(_('Open Preferences'), Gtk.ResponseType.OK)
++        dialog.add_button(Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE)
++        if dialog.run() == Gtk.ResponseType.OK:
++            preferences_dialog.open_dialog(None, self._window)
++
++    def _show_error(self, detail):
++        dialog = message_dialog.MessageDialog(self._window,
++            Gtk.DialogFlags.MODAL, Gtk.MessageType.ERROR, Gtk.ButtonsType.CLOSE)
++        dialog.set_text(_('AI request failed'), detail)
++        dialog.run()
++
++    def _show_info(self, title, detail):
++        dialog = message_dialog.MessageDialog(self._window,
++            Gtk.DialogFlags.MODAL, Gtk.MessageType.INFO, Gtk.ButtonsType.CLOSE)
++        dialog.set_text(title, detail)
++        dialog.run()
++
++    def _show_text_result(self, result):
++        dialog = Gtk.Dialog(_('AI answer'), self._window,
++            Gtk.DialogFlags.DESTROY_WITH_PARENT,
++            (_('_Copy'), Gtk.ResponseType.APPLY,
++             Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE))
++        dialog.set_default_size(650, 500)
++        scrolled = Gtk.ScrolledWindow()
++        scrolled.set_border_width(10)
++        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
++        text_view = Gtk.TextView()
++        text_view.set_editable(False)
++        text_view.set_cursor_visible(True)
++        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
++        text_view.get_buffer().set_text(result)
++        scrolled.add(text_view)
++        dialog.get_content_area().pack_start(scrolled, True, True, 0)
++        dialog.show_all()
++        while dialog.run() == Gtk.ResponseType.APPLY:
++            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(result, -1)
++        dialog.destroy()
+Index: mcomix-3.2.0/mcomix/constants.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/constants.py	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/mcomix/constants.py	2026-09-04 19:35:29.000000000 +0200
+@@ -20,6 +20,7 @@
+ LASTPAGE_DATABASE_PATH = os.path.join(DATA_DIR, 'lastreadpage.db')
+ LIBRARY_COVERS_PATH = os.path.join(DATA_DIR, 'library_covers')
+ PREFERENCE_PATH = os.path.join(CONFIG_DIR, 'preferences.conf')
++AI_CREDENTIAL_PATH = os.path.join(CONFIG_DIR, 'ai-credentials.conf')
+ KEYBINDINGS_CONF_PATH = os.path.join(CONFIG_DIR, 'keybindings.conf')
+ 
+ BOOKMARK_PICKLE_PATH = os.path.join(DATA_DIR, 'bookmarks.pickle')
+Index: mcomix-3.2.0/mcomix/i18n.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/i18n.py	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/mcomix/i18n.py	2026-09-04 19:35:29.000000000 +0200
+@@ -15,6 +15,7 @@
+ from mcomix import preferences
+ from mcomix import portability
+ from mcomix import constants
++from mcomix import local_translations
+ 
+ # Translation instance to enable other modules to use
+ # functions other than the global _() if necessary
+@@ -88,6 +89,7 @@
+     domain = constants.APPNAME.lower()
+ 
+     # Search for .mo files manually, since gettext doesn't support packaged resources
++    selected_lang = lang
+     for lang in lang_identifiers:
+         resource = os.path.join('messages', lang, 'LC_MESSAGES', '%s.mo' % domain)
+         try:
+@@ -97,10 +99,15 @@
+         else:
+             fp = io.BytesIO(translation_content)
+             translation = gettext.GNUTranslations(fp)
++            selected_lang = lang
+             break
+     else:
+         translation = gettext.NullTranslations()
+ 
++    local_translation = local_translations.get_translation(selected_lang)
++    if local_translation is not None:
++        translation.add_fallback(local_translation)
++
+     global _translation
+     _translation = translation
+ 
+Index: mcomix-3.2.0/mcomix/image_handler.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/image_handler.py	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/mcomix/image_handler.py	2026-09-04 19:35:29.000000000 +0200
+@@ -47,6 +47,9 @@
+         self._wanted_pixbufs = []
+         #: Pixbuf map from page > Pixbuf
+         self._raw_pixbufs = {}
++        #: Session-only AI-generated replacements, indexed by page.
++        self._page_overrides = {}
++        self._generation = 0
+         #: How many pages to keep in cache
+         self._cache_pages = prefs['max pages to cache']
+ 
+@@ -56,6 +59,9 @@
+         """Return the pixbuf indexed by <index> from cache.
+         Pixbufs not found in cache are fetched from disk first.
+         """
++        if index in self._page_overrides:
++            return self._page_overrides[index]
++
+         pixbuf = image_tools.MISSING_IMAGE_ICON
+ 
+         if index not in self._raw_pixbufs:
+@@ -202,8 +208,39 @@
+         self._current_image_index = None
+         self._available_images.clear()
+         self._raw_pixbufs.clear()
++        self._page_overrides.clear()
++        self._generation += 1
+         self._cache_pages = prefs['max pages to cache']
+ 
++    def get_generation(self):
++        """Return an identity token that changes whenever the book closes."""
++        return self._generation
++
++    def get_page_override(self, page=None):
++        """Return the session-only replacement for a page, if one exists."""
++        if page is None:
++            page = self.get_current_page()
++        return self._page_overrides.get(page - 1)
++
++    def set_page_override(self, page, pixbuf, expected_path=None,
++                          expected_generation=None):
++        """Replace a page in memory if it still refers to the expected file."""
++        if (expected_generation is not None and
++                expected_generation != self._generation):
++            return False
++        if page < 1 or page > self.get_number_of_pages():
++            return False
++        if expected_path is not None and self.get_path_to_page(page) != expected_path:
++            return False
++        self._page_overrides[page - 1] = pixbuf
++        return True
++
++    def clear_page_override(self, page=None):
++        """Discard a page replacement and return whether one was present."""
++        if page is None:
++            page = self.get_current_page()
++        return self._page_overrides.pop(page - 1, None) is not None
++
+     def page_is_available(self, page=None):
+         """ Returns True if <page> is available and calls to get_pixbufs
+         would not block. If <page> is None, the current page(s) are assumed. """
+Index: mcomix-3.2.0/mcomix/local_translations.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/mcomix/local_translations.py	2026-09-04 19:35:29.000000000 +0200
+@@ -0,0 +1,88 @@
++"""Small source-based catalog for Debian-local MComix additions."""
++
++import gettext
++
++
++GERMAN = {
++    'AI/API': 'KI/API',
++    'Ask questions about images': 'Fragen zu Bildern stellen',
++    'Transform images': 'Bilder transformieren',
++    'Endpoint URL:': 'Endpunkt-URL:',
++    'API key:': 'API-Schlüssel:',
++    'Model:': 'Modell:',
++    'Timeout (seconds):': 'Zeitlimit (Sekunden):',
++    'Images and prompts are sent to the configured external services.':
++        'Bilder und Prompts werden an die konfigurierten externen Dienste gesendet.',
++    '_Ask AI about image...': 'KI zum Bild _fragen …',
++    'Ask a question about the current image.':
++        'Eine Frage zum aktuellen Bild stellen.',
++    '_Transform image with AI...': 'Bild mit KI _transformieren …',
++    'Transform the current image using an AI service.':
++        'Das aktuelle Bild mit einem KI-Dienst transformieren.',
++    '_Reset AI transformation': 'KI-Transformation _zurücksetzen',
++    'Restore the original image for the current page.':
++        'Das Originalbild der aktuellen Seite wiederherstellen.',
++    '_Send': '_Senden',
++    'Waiting for the API response…': 'Auf die API-Antwort wird gewartet …',
++    'No AI transformation': 'Keine KI-Transformation',
++    'The current page has no AI-generated image to reset.':
++        'Die aktuelle Seite besitzt kein KI-generiertes Bild zum Zurücksetzen.',
++    'Ask AI about image': 'KI zum Bild fragen',
++    'Enter a question about the current image:':
++        'Eine Frage zum aktuellen Bild eingeben:',
++    'Transform image with AI': 'Bild mit KI transformieren',
++    'Describe how the current image should be transformed:':
++        'Beschreiben, wie das aktuelle Bild transformiert werden soll:',
++    'Prompt required': 'Prompt erforderlich',
++    'Please enter a prompt.': 'Bitte einen Prompt eingeben.',
++    'The API returned invalid image data.':
++        'Die API hat ungültige Bilddaten zurückgegeben.',
++    'Image is no longer open': 'Bild ist nicht mehr geöffnet',
++    'The result was discarded because its source image is no longer open.':
++        'Das Ergebnis wurde verworfen, weil sein Quellbild nicht mehr geöffnet ist.',
++    'AI service is not configured': 'KI-Dienst ist nicht konfiguriert',
++    'Set an endpoint URL and model in Preferences → AI/API.':
++        'Endpunkt-URL und Modell unter Einstellungen → KI/API festlegen.',
++    'Open Preferences': 'Einstellungen öffnen',
++    'AI request failed': 'KI-Anfrage fehlgeschlagen',
++    'AI answer': 'KI-Antwort',
++    '_Copy': '_Kopieren',
++    'The API response is too large.': 'Die API-Antwort ist zu groß.',
++    'The API returned invalid JSON.': 'Die API hat ungültiges JSON zurückgegeben.',
++    'The API returned an unexpected response.':
++        'Die API hat eine unerwartete Antwort zurückgegeben.',
++    'The API request timed out.': 'Die Zeit für die API-Anfrage wurde überschritten.',
++    'The API request failed: %s': 'Die API-Anfrage ist fehlgeschlagen: %s',
++    'The API response does not contain a text answer.':
++        'Die API-Antwort enthält keine Textantwort.',
++    'The API returned an unsupported image URL.':
++        'Die API hat eine nicht unterstützte Bild-URL zurückgegeben.',
++    'The returned image is too large.': 'Das zurückgegebene Bild ist zu groß.',
++    'The returned image is empty or too large.':
++        'Das zurückgegebene Bild ist leer oder zu groß.',
++    'The API returned an invalid image.':
++        'Die API hat ein ungültiges Bild zurückgegeben.',
++    'The API response does not contain an image.':
++        'Die API-Antwort enthält kein Bild.',
++    'The API returned invalid base64 image data.':
++        'Die API hat ungültige Base64-Bilddaten zurückgegeben.',
++}
++
++
++class DictionaryTranslations(gettext.NullTranslations):
++    def __init__(self, catalog):
++        super().__init__()
++        self._catalog = catalog
++
++    def gettext(self, message):
++        if message in self._catalog:
++            return self._catalog[message]
++        if self._fallback:
++            return self._fallback.gettext(message)
++        return message
++
++
++def get_translation(language):
++    if language and language.split('_', 1)[0].split('-', 1)[0] == 'de':
++        return DictionaryTranslations(GERMAN)
++    return None
+Index: mcomix-3.2.0/mcomix/main.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/main.py	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/mcomix/main.py	2026-09-04 19:35:29.000000000 +0200
+@@ -30,6 +30,7 @@
+ from mcomix import keybindings
+ from mcomix import zoom
+ from mcomix import bookmark_backend
++from mcomix import ai_dialog
+ from mcomix import message_dialog
+ from mcomix import callback
+ from mcomix.library import backend, main_dialog
+@@ -103,6 +104,7 @@
+         self.lens = lens.MagnifyingLens(self)
+         self.osd = osd.OnScreenDisplay(self)
+         self.zoom = zoom.ZoomModel()
++        self.ai = ai_dialog.AIHandler(self)
+         self.uimanager = ui.MainUI(self)
+         self.menubar = self.uimanager.get_widget('/Menu')
+         self.toolbar = self.uimanager.get_widget('/Tool')
+@@ -995,6 +997,10 @@
+             if not file_path:
+                 return
+             file_name = os.path.split(file_path)[-1]
++            page = self.imagehandler.get_current_page() + i
++            override = self.imagehandler.get_page_override(page)
++            if override is not None:
++                file_name = os.path.splitext(file_name)[0] + '_ai.png'
+ 
+             if self.filehandler.archive_type is not None:
+                 # Prepend the archive base name to the filename being displayed
+@@ -1025,7 +1031,12 @@
+                 if target:
+                     target = i18n.to_unicode(target)
+                     try:
+-                        shutil.copy2(file_path, target)
++                        if override is None:
++                            shutil.copy2(file_path, target)
++                        else:
++                            image_tools.pixbuf_to_pil(
++                                image_tools.static_image(override)).save(
++                                    target, format='PNG')
+                     except Exception as e:
+                         log.warning(e)
+ 
+Index: mcomix-3.2.0/mcomix/preferences.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/preferences.py	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/mcomix/preferences.py	2026-09-04 19:35:29.000000000 +0200
+@@ -113,6 +113,19 @@
+     'animation mode': constants.ANIMATION_NORMAL,
+     'double page autoresize': constants.DOUBLE_PAGE_AUTORESIZE_SIZE,
+     'space between two pages': 2,
++    'ai text endpoint': 'https://api.openai.com/v1/chat/completions',
++    'ai text model': '',
++    'ai text timeout': 180,
++    'ai image endpoint': 'https://api.openai.com/v1/images/edits',
++    'ai image model': '',
++    'ai image timeout': 180,
++}
++
++# Secrets are deliberately kept out of preferences.conf.  This file is
++# written with owner-only permissions by write_preferences_file().
++credentials = {
++    'ai text api key': '',
++    'ai image api key': '',
+ }
+ 
+ 
+@@ -173,6 +186,16 @@
+             if key in prefs:
+                 prefs[key] = saved_prefs[key]
+ 
++    try:
++        with open(constants.AI_CREDENTIAL_PATH, 'r') as credentials_file:
++            saved_credentials = json.load(credentials_file)
++        if isinstance(saved_credentials, dict):
++            for key in saved_credentials:
++                if key in credentials and isinstance(saved_credentials[key], str):
++                    credentials[key] = saved_credentials[key]
++    except (OSError, ValueError, TypeError):
++        pass
++
+ def write_preferences_file():
+     """Write preference data to disk."""
+     # TODO: it might be better to save only those options that were (ever)
+@@ -185,4 +208,15 @@
+     json.dump(prefs, config_file, indent=2)
+     config_file.close()
+ 
++    credential_fd = os.open(constants.AI_CREDENTIAL_PATH,
++        os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++    try:
++        os.chmod(constants.AI_CREDENTIAL_PATH, 0o600)
++        with os.fdopen(credential_fd, 'w') as credentials_file:
++            credential_fd = None
++            json.dump(credentials, credentials_file, indent=2)
++    finally:
++        if credential_fd is not None:
++            os.close(credential_fd)
++
+ # vim: expandtab:sw=4:ts=4
+Index: mcomix-3.2.0/mcomix/preferences_dialog.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/preferences_dialog.py	2026-09-04 19:35:29.000000000 +0200
++++ mcomix-3.2.0/mcomix/preferences_dialog.py	2026-09-04 19:39:57.945489565 +0200
+@@ -5,7 +5,7 @@
+ import operator
+ from gi.repository import Gdk, GdkPixbuf, Gtk, GObject
+ 
+-from mcomix.preferences import prefs
++from mcomix.preferences import credentials, prefs
+ from mcomix import preferences_page
+ from mcomix import image_tools
+ from mcomix import constants
+@@ -44,6 +44,7 @@
+             (_('Appearance'), self._init_appearance_tab),
+             (_('Behaviour'), self._init_behaviour_tab),
+             (_('Display'), self._init_display_tab),
++            (_('AI/API'), self._init_ai_tab),
+             (_('Advanced'), self._init_advanced_tab),
+         )
+ 
+@@ -289,6 +290,38 @@
+ 
+         return page
+ 
++    def _init_ai_tab(self):
++        page = preferences_page._PreferencePage(None)
++
++        page.new_section(_('Ask questions about images'))
++        page.add_row(Gtk.Label(label=_('Endpoint URL:')),
++            self._create_string_entry('ai text endpoint'))
++        page.add_row(Gtk.Label(label=_('API key:')),
++            self._create_string_entry('ai text api key', secret=True))
++        page.add_row(Gtk.Label(label=_('Model:')),
++            self._create_string_entry('ai text model'))
++        page.add_row(Gtk.Label(label=_('Timeout (seconds):')),
++            self._create_pref_spinner('ai text timeout', 1, 10, 3600,
++            10, 60, 0, None))
++
++        page.new_section(_('Transform images'))
++        page.add_row(Gtk.Label(label=_('Endpoint URL:')),
++            self._create_string_entry('ai image endpoint'))
++        page.add_row(Gtk.Label(label=_('API key:')),
++            self._create_string_entry('ai image api key', secret=True))
++        page.add_row(Gtk.Label(label=_('Model:')),
++            self._create_string_entry('ai image model'))
++        page.add_row(Gtk.Label(label=_('Timeout (seconds):')),
++            self._create_pref_spinner('ai image timeout', 1, 10, 3600,
++            10, 60, 0, None))
++
++        note = Gtk.Label(label=_(
++            'Images and prompts are sent to the configured external services.'))
++        note.set_line_wrap(True)
++        note.set_alignment(0, 0.5)
++        page.add_row(note)
++        return page
++
+     def _init_advanced_tab(self):
+         # ----------------------------------------------------------------
+         # The "Advanced" tab.
+@@ -742,6 +775,21 @@
+             button.set_tooltip_text(tooltip_text)
+         return button
+ 
++    def _create_string_entry(self, prefkey, secret=False):
++        entry = Gtk.Entry()
++        source = credentials if secret else prefs
++        entry.set_text(source[prefkey])
++        entry.set_hexpand(True)
++        if secret:
++            entry.set_visibility(False)
++            entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
++        entry.connect('changed', self._string_entry_cb, prefkey, secret)
++        return entry
++
++    def _string_entry_cb(self, entry, prefkey, secret):
++        target = credentials if secret else prefs
++        target[prefkey] = entry.get_text().strip()
++
+ 
+     def _create_binary_pref_radio_buttons(self, label1, prefkey1, tooltip_text1,
+         label2, prefkey2, tooltip_text2):
+@@ -903,6 +951,9 @@
+             prefs[preference] = int(value)
+             self._window.update_space()
+ 
++        elif preference in ('ai text timeout', 'ai image timeout'):
++            prefs[preference] = int(value)
++
+ 
+     def _entry_cb(self, entry, event=None):
+         """Callback for entry-type preferences."""
+Index: mcomix-3.2.0/mcomix/ui.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/ui.py	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/mcomix/ui.py	2026-09-04 19:35:29.000000000 +0200
+@@ -201,6 +201,20 @@
+             ('library', 'mcomix-library', _('_Library...'),
+                 None, None, library_main_dialog.open_dialog)], window)
+ 
++        self._actiongroup.add_actions([
++            ('ai_ask_image', Gtk.STOCK_DIALOG_QUESTION,
++                _('_Ask AI about image...'), None,
++                _('Ask a question about the current image.'),
++                window.ai.ask_about_image),
++            ('ai_transform_image', Gtk.STOCK_CONVERT,
++                _('_Transform image with AI...'), None,
++                _('Transform the current image using an AI service.'),
++                window.ai.transform_image),
++            ('ai_reset_image', Gtk.STOCK_UNDO,
++                _('_Reset AI transformation'), None,
++                _('Restore the original image for the current page.'),
++                window.ai.reset_transformation)])
++
+         # fix some gtk magic: removing unreqired accelerators
+         Gtk.AccelMap.change_entry('<Actions>/mcomix-main/%s' % 'close', 0, 0, True)
+ 
+@@ -228,6 +242,9 @@
+                 <toolitem action="manga_mode" />
+                 <separator />
+                 <toolitem action="lens" />
++                <separator />
++                <toolitem action="ai_ask_image" />
++                <toolitem action="ai_transform_image" />
+             </toolbar>
+ 
+             <menubar name="Menu">
+@@ -305,6 +322,10 @@
+                 <menu action="menu_bookmarks">
+                 </menu>
+                 <menu action="menu_tools">
++                    <menuitem action="ai_ask_image" />
++                    <menuitem action="ai_transform_image" />
++                    <menuitem action="ai_reset_image" />
++                    <separator />
+                     <menuitem action="enhance_image" />
+                     <menu action="menu_transform">
+                         <menuitem action="rotate_90" />
+@@ -460,6 +481,7 @@
+                    'previous_directory',
+                    'keep_transformation',
+                    'enhance_image')
++        general += ('ai_ask_image', 'ai_transform_image', 'ai_reset_image')
+ 
+         comment = ('comments',)
+ 
+Index: mcomix-3.2.0/pyproject.toml
+===================================================================
+--- mcomix-3.2.0.orig/pyproject.toml	2026-09-04 19:20:24.000000000 +0200
++++ mcomix-3.2.0/pyproject.toml	2026-09-04 19:35:29.000000000 +0200
+@@ -23,6 +23,7 @@
+   "PyGObject>=3.36.0",
+   "pycairo>=1.16.0",
+   "Pillow>=6.0.0",
++  "requests>=2.25.0",
+ ]
+ 
+ [project.optional-dependencies]
+Index: mcomix-3.2.0/tests/test_ai_client.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/test_ai_client.py	2026-09-04 19:35:29.000000000 +0200
+@@ -0,0 +1,111 @@
++import base64
++import io
++import unittest
++from unittest import mock
++
++from PIL import Image
++import requests
++
++from mcomix import ai_client
++
++
++def png_bytes():
++    output = io.BytesIO()
++    Image.new("RGB", (2, 2), "red").save(output, "PNG")
++    return output.getvalue()
++
++
++def response(payload, status=200):
++    result = mock.Mock()
++    result.ok = status < 400
++    result.status_code = status
++    result.reason = "error"
++    result.text = ""
++    result.content = b"{}"
++    result.json.return_value = payload
++    return result
++
++
++class AskAboutImageTest(unittest.TestCase):
++    @mock.patch("mcomix.ai_client.requests.post")
++    def test_sends_multimodal_chat_completion(self, post):
++        post.return_value = response({
++            "choices": [{"message": {"content": "A red square."}}],
++        })
++
++        answer = ai_client.ask_about_image(
++            "https://example.test/chat", "secret", "vision-model",
++            "What is shown?", png_bytes(), 12)
++
++        self.assertEqual(answer, "A red square.")
++        kwargs = post.call_args.kwargs
++        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret")
++        self.assertEqual(kwargs["json"]["model"], "vision-model")
++        content = kwargs["json"]["messages"][0]["content"]
++        self.assertEqual(content[0]["text"], "What is shown?")
++        self.assertTrue(content[1]["image_url"]["url"].startswith(
++            "data:image/png;base64,"))
++
++    @mock.patch("mcomix.ai_client.requests.post")
++    def test_accepts_content_parts(self, post):
++        post.return_value = response({"choices": [{"message": {"content": [
++            {"type": "text", "text": "First"},
++            {"type": "text", "text": "Second"},
++        ]}}]})
++        answer = ai_client.ask_about_image(
++            "https://example.test/chat", "", "model", "prompt", png_bytes(), 12)
++        self.assertEqual(answer, "First\nSecond")
++        self.assertNotIn("Authorization", post.call_args.kwargs["headers"])
++
++    @mock.patch("mcomix.ai_client.requests.post")
++    def test_reports_provider_error(self, post):
++        post.return_value = response({"error": {"message": "bad model"}}, 400)
++        with self.assertRaisesRegex(ai_client.AIError, "HTTP 400: bad model"):
++            ai_client.ask_about_image(
++                "https://example.test/chat", "", "model", "prompt", png_bytes(), 12)
++
++    @mock.patch("mcomix.ai_client.requests.post", side_effect=requests.Timeout())
++    def test_reports_timeout(self, post):
++        with self.assertRaisesRegex(ai_client.AIError, "timed out"):
++            ai_client.ask_about_image(
++                "https://example.test/chat", "", "model", "prompt", png_bytes(), 12)
++
++
++class TransformImageTest(unittest.TestCase):
++    @mock.patch("mcomix.ai_client.requests.post")
++    def test_decodes_base64_image(self, post):
++        expected = png_bytes()
++        post.return_value = response({
++            "data": [{"b64_json": base64.b64encode(expected).decode("ascii")}],
++        })
++        actual = ai_client.transform_image(
++            "https://example.test/edit", "secret", "image-model",
++            "make it blue", png_bytes(), 12)
++        self.assertEqual(actual, expected)
++        kwargs = post.call_args.kwargs
++        self.assertEqual(kwargs["data"]["model"], "image-model")
++        self.assertEqual(kwargs["files"]["image"][2], "image/png")
++
++    @mock.patch("mcomix.ai_client.requests.get")
++    @mock.patch("mcomix.ai_client.requests.post")
++    def test_downloads_url_image(self, post, get):
++        post.return_value = response({"data": [{"url": "https://cdn.test/result"}]})
++        downloaded = response({})
++        downloaded.iter_content.return_value = [png_bytes()]
++        get.return_value = downloaded
++        actual = ai_client.transform_image(
++            "https://example.test/edit", "", "model", "prompt", png_bytes(), 12)
++        self.assertEqual(actual, png_bytes())
++
++    @mock.patch("mcomix.ai_client.requests.post")
++    def test_rejects_invalid_image(self, post):
++        post.return_value = response({"data": [{
++            "b64_json": base64.b64encode(b"not an image").decode("ascii"),
++        }]})
++        with self.assertRaisesRegex(ai_client.AIError, "invalid image"):
++            ai_client.transform_image(
++                "https://example.test/edit", "", "model", "prompt", png_bytes(), 12)
++
++
++if __name__ == "__main__":
++    unittest.main()

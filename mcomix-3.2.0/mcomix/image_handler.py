@@ -47,6 +47,9 @@ class ImageHandler(object):
         self._wanted_pixbufs = []
         #: Pixbuf map from page > Pixbuf
         self._raw_pixbufs = {}
+        #: Session-only AI-generated replacements, indexed by page.
+        self._page_overrides = {}
+        self._generation = 0
         #: How many pages to keep in cache
         self._cache_pages = prefs['max pages to cache']
 
@@ -56,6 +59,9 @@ class ImageHandler(object):
         """Return the pixbuf indexed by <index> from cache.
         Pixbufs not found in cache are fetched from disk first.
         """
+        if index in self._page_overrides:
+            return self._page_overrides[index]
+
         pixbuf = image_tools.MISSING_IMAGE_ICON
 
         if index not in self._raw_pixbufs:
@@ -202,7 +208,38 @@ class ImageHandler(object):
         self._current_image_index = None
         self._available_images.clear()
         self._raw_pixbufs.clear()
+        self._page_overrides.clear()
+        self._generation += 1
         self._cache_pages = prefs['max pages to cache']
+
+    def get_generation(self):
+        """Return an identity token that changes whenever the book closes."""
+        return self._generation
+
+    def get_page_override(self, page=None):
+        """Return the session-only replacement for a page, if one exists."""
+        if page is None:
+            page = self.get_current_page()
+        return self._page_overrides.get(page - 1)
+
+    def set_page_override(self, page, pixbuf, expected_path=None,
+                          expected_generation=None):
+        """Replace a page in memory if it still refers to the expected file."""
+        if (expected_generation is not None and
+                expected_generation != self._generation):
+            return False
+        if page < 1 or page > self.get_number_of_pages():
+            return False
+        if expected_path is not None and self.get_path_to_page(page) != expected_path:
+            return False
+        self._page_overrides[page - 1] = pixbuf
+        return True
+
+    def clear_page_override(self, page=None):
+        """Discard a page replacement and return whether one was present."""
+        if page is None:
+            page = self.get_current_page()
+        return self._page_overrides.pop(page - 1, None) is not None
 
     def page_is_available(self, page=None):
         """ Returns True if <page> is available and calls to get_pixbufs

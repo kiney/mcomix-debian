@@ -5,8 +5,8 @@
 import operator
 from gi.repository import Gdk, GdkPixbuf, Gtk, GObject
 
-from mcomix.preferences import prefs
-from mcomix import preferences_page
+from mcomix.preferences import credentials, prefs
+from mcomix import preferences, preferences_page
 from mcomix import image_tools
 from mcomix import constants
 from mcomix import message_dialog
@@ -44,6 +44,7 @@ class _PreferencesDialog(Gtk.Dialog):
             (_('Appearance'), self._init_appearance_tab),
             (_('Behaviour'), self._init_behaviour_tab),
             (_('Display'), self._init_display_tab),
+            (_('AI/API'), self._init_ai_tab),
             (_('Advanced'), self._init_advanced_tab),
         )
 
@@ -289,6 +290,38 @@ class _PreferencesDialog(Gtk.Dialog):
 
         return page
 
+    def _init_ai_tab(self):
+        page = preferences_page._PreferencePage(None)
+
+        page.new_section(_('Ask questions about images'))
+        page.add_row(Gtk.Label(label=_('Endpoint URL:')),
+            self._create_string_entry('ai text endpoint'))
+        page.add_row(Gtk.Label(label=_('API key:')),
+            self._create_string_entry('ai text api key', secret=True))
+        page.add_row(Gtk.Label(label=_('Model:')),
+            self._create_string_entry('ai text model'))
+        page.add_row(Gtk.Label(label=_('Timeout (seconds):')),
+            self._create_pref_spinner('ai text timeout', 1, 10, 3600,
+            10, 60, 0, None))
+
+        page.new_section(_('Transform images'))
+        page.add_row(Gtk.Label(label=_('Endpoint URL:')),
+            self._create_string_entry('ai image endpoint'))
+        page.add_row(Gtk.Label(label=_('API key:')),
+            self._create_string_entry('ai image api key', secret=True))
+        page.add_row(Gtk.Label(label=_('Model:')),
+            self._create_string_entry('ai image model'))
+        page.add_row(Gtk.Label(label=_('Timeout (seconds):')),
+            self._create_pref_spinner('ai image timeout', 1, 10, 3600,
+            10, 60, 0, None))
+
+        note = Gtk.Label(label=_(
+            'Images and prompts are sent to the configured external services.'))
+        note.set_line_wrap(True)
+        note.set_alignment(0, 0.5)
+        page.add_row(note)
+        return page
+
     def _init_advanced_tab(self):
         # ----------------------------------------------------------------
         # The "Advanced" tab.
@@ -371,6 +404,7 @@ class _PreferencesDialog(Gtk.Dialog):
 
     def _response(self, dialog, response):
         if response == Gtk.ResponseType.CLOSE:
+            preferences.write_preferences_file()
             _close_dialog()
 
         elif response == constants.RESPONSE_REVERT_TO_DEFAULT:
@@ -388,6 +422,7 @@ class _PreferencesDialog(Gtk.Dialog):
 
         else:
             # Other responses close the dialog, e.g. clicking the X icon on the dialog.
+            preferences.write_preferences_file()
             _close_dialog()
 
     def _create_language_control(self):
@@ -742,6 +777,21 @@ class _PreferencesDialog(Gtk.Dialog):
             button.set_tooltip_text(tooltip_text)
         return button
 
+    def _create_string_entry(self, prefkey, secret=False):
+        entry = Gtk.Entry()
+        source = credentials if secret else prefs
+        entry.set_text(source[prefkey])
+        entry.set_hexpand(True)
+        if secret:
+            entry.set_visibility(False)
+            entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        entry.connect('changed', self._string_entry_cb, prefkey, secret)
+        return entry
+
+    def _string_entry_cb(self, entry, prefkey, secret):
+        target = credentials if secret else prefs
+        target[prefkey] = entry.get_text().strip()
+
 
     def _create_binary_pref_radio_buttons(self, label1, prefkey1, tooltip_text1,
         label2, prefkey2, tooltip_text2):
@@ -902,6 +952,9 @@ class _PreferencesDialog(Gtk.Dialog):
         elif preference == 'space between two pages':
             prefs[preference] = int(value)
             self._window.update_space()
+
+        elif preference in ('ai text timeout', 'ai image timeout'):
+            prefs[preference] = int(value)
 
 
     def _entry_cb(self, entry, event=None):
