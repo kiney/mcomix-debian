@@ -1,0 +1,5 @@
+include ChangeLog.md
+recursive-include mcomix/messages *.mo
+graft mcomix/images
+graft share
+prune test

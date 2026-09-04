@@ -1,0 +1,10 @@
+--- a/mcomix.egg-info/SOURCES.txt
++++ b/mcomix.egg-info/SOURCES.txt
+@@ -3,6 +3,7 @@
+ MANIFEST.in
+ README.md
+ pyproject.toml
++setup.cfg
+ mcomix/__init__.py
+ mcomix/__main__.py
+ mcomix/about_dialog.py

@@ -1,0 +1,4 @@
+share/applications/mcomix.desktop usr/share/applications
+share/icons usr/share
+share/metainfo/mcomix.metainfo.xml usr/share/metainfo
+share/mime/packages/mcomix.xml usr/share/mime/packages

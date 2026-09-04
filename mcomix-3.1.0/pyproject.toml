@@ -1,0 +1,76 @@
+[project]
+name = "mcomix"
+dynamic = ["version"]
+description = "GTK comic book viewer"
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.7"
+license = {file = "COPYING"}
+authors = [{name = "Pontus Ekberg"}]
+maintainers = [{name = "The MComix Team"}]
+keywords = ["comix", "comics", "manga", "images", "reader", "image viewer", "cbr", "cbz"]
+classifiers = [
+  "Development Status :: 6 - Mature",
+  "Environment :: X11 Applications :: GTK",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: POSIX :: BSD",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics :: Viewers"
+]
+dependencies = [
+  "PyGObject>=3.36.0",
+  "pycairo>=1.16.0",
+  "Pillow>=6.0.0",
+]
+
+[project.optional-dependencies]
+fileformats = [
+  "chardet",
+  "PyMuPDF>=1.19.2"
+]
+dev = [
+  # For building Windows package
+  "pyinstaller; os_name == 'nt'",
+  # For creating source package
+  "build",
+  # For updating virtual environment
+  "pip-review",
+  # For language server/IDE
+  "python-lsp-server[flake8]",
+  "pylsp-mypy",
+  "pyls-isort",
+  "python-lsp-black",
+  # For mypy
+  "types-Pillow",
+  "pygobject-stubs"
+]
+
+[project.urls]
+Homepage = "https://mcomix.sourceforge.io"
+Documentation = "https://sourceforge.net/projects/mcomix/Wiki/Home/"
+Repository = "https://sourceforge.net/p/mcomix/git/ci/master/tree/"
+Changelog = "https://sourceforge.net/p/mcomix/news/"
+
+[project.scripts]
+mcomix = "mcomix.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mcomix*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mcomix.constants.VERSION"}
+
+[tool.mypy]
+disallow_untyped_defs = true
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+show_error_codes = true
+warn_unused_ignores = true
