@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2023 Moritz Brunner -->
+<component type="desktop-application">
+ <id>net.sourceforge.mcomix</id>
+ <metadata_license>CC0-1.0</metadata_license>
+ <project_license>GPL-2.0+</project_license>
+ <name>MComix</name>
+ <summary>Comic and general purpose image viewer</summary>
+ <description>
+  <p>
+	  MComix is a user-friendly, customizable image viewer. It is specifically
+	  designed to handle comic books (both Western comics and manga) and supports
+	  a variety of container formats (including CBR, CBZ, CB7, CBT, LHA and PDF).
+  </p>
+  <p>
+	  MComix is a fork of the Comix project, and aims to add bug fixes and
+	  stability improvements after Comix development came to a halt in
+	  late 2009.
+  </p>
+ </description>
+
+ <launchable type="desktop-id">mcomix.desktop</launchable>
+
+ <screenshots>
+  <screenshot type="default">
+  <image>https://sourceforge.net/p/mcomix/screenshot/273797.jpg</image>
+  <caption>Main window</caption>
+  </screenshot>
+ </screenshots>
+
+ <url type="homepage">https://mcomix.sourceforge.net/</url>
+
+ <developer id="net.sourceforge.mcomix">
+  <name>The MComix Team</name>
+ </developer>
+ <update_contact>https://sourceforge.net/p/mcomix/bugs/</update_contact>
+
+ <provides>
+  <binary>mcomix</binary>
+ </provides>
+
+ <releases>
+  <release version="3.1.0" date="2024-01-21"/>
+  <release version="3.0.0" date="2023-12-22"/>
+  <release version="2.1.1" date="2023-05-16"/>
+  <release version="2.1.0" date="2022-12-17"/>
+  <release version="2.0.2" date="2022-05-20"/>
+ </releases>
+ <content_rating type="oars-1.1"/>
+</component>

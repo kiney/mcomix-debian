@@ -1,0 +1,25 @@
+Source: mcomix
+Section: x11
+Priority: optional
+Maintainer: Emfox Zhou <emfox@debian.org>
+Build-Depends: debhelper (>= 12.0.0~), pybuild-plugin-pyproject
+Build-Depends-Indep: python3, python3-setuptools, dh-python
+Standards-Version: 4.7.0
+Homepage: https://mcomix.sourceforge.io/
+
+Package: mcomix
+Architecture: all
+Depends: ${misc:Depends}, ${python3:Depends}, gir1.2-gtk-3.0, python3-pil,
+         python3-gi, python3-cairo, python3-gi-cairo
+Recommends: python3-chardet
+Suggests: unrar | libunrar5, 7zip, mupdf-tools, unzip, lhasa
+Description: GTK+ image viewer for comic books
+ MComix is an user-friendly, customizable image viewer. It is specifically
+ designed to handle comic books, but also serves as a generic viewer.
+ It reads images in ZIP, RAR, 7Zip or tar archives as well as plain image
+ files. It is written in Python and uses GTK+ 3 through the PyGObject bindings,
+ and runs on both Linux and Windows.
+ .
+ MComix is a fork of the Comix project, and aims to add bug fixes
+ and stability improvements after Comix development came to a halt in late
+ 2009.
