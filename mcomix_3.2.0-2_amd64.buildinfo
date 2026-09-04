@@ -2,16 +2,16 @@ Format: 1.0
 Source: mcomix
 Binary: mcomix
 Architecture: all
-Version: 3.2.0-1
+Version: 3.2.0-2
 Checksums-Md5:
- b3100abc4b07e32c17f515a3a0049ae2 445836 mcomix_3.2.0-1_all.deb
+ a698c6ebc983588f9a817966e95a5347 446028 mcomix_3.2.0-2_all.deb
 Checksums-Sha1:
- e8cd0cce6b79cbe2b63f74da10322c6fcfa0e2cc 445836 mcomix_3.2.0-1_all.deb
+ 6ca356ef2904735a2bc1b9e96e1fe000fdd983c4 446028 mcomix_3.2.0-2_all.deb
 Checksums-Sha256:
- d9eeea80d0d280c54d757fa20aa7973697c93b647448db07ef385058e4ca1039 445836 mcomix_3.2.0-1_all.deb
+ 80a57ee4bfbb418973325a60684e97b6bd57eca8fa72633baa789ae66a96bc30 446028 mcomix_3.2.0-2_all.deb
 Build-Origin: Debian
 Build-Architecture: amd64
-Build-Date: Fri, 04 Sep 2026 18:15:24 +0200
+Build-Date: Fri, 04 Sep 2026 18:23:42 +0200
 Build-Tainted-By:
  usr-local-has-programs
 Installed-Build-Depends:
@@ -162,4 +162,4 @@ Environment:
  LC_ALL="C.UTF-8"
  LC_CTYPE="C.UTF-8"
  LD_LIBRARY_PATH=""
- SOURCE_DATE_EPOCH="1788538368"
+ SOURCE_DATE_EPOCH="1788538920"

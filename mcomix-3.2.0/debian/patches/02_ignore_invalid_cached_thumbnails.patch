@@ -1,0 +1,34 @@
+Description: Regenerate cached thumbnails with missing or invalid metadata
+ MComix 3.2.0 switched to the XDG thumbnail cache, where it can encounter
+ thumbnails written by other applications.  Do not fail thumbnail generation
+ when such a file lacks valid Thumb::MTime metadata; treat it as stale instead.
+Author: Jannik Winkel <jannik.winkel@kiney.de>
+Forwarded: no
+Last-Update: 2026-09-04
+
+--- a/mcomix/thumbnail_tools.py
++++ b/mcomix/thumbnail_tools.py
+@@ -236,18 +236,18 @@ class Thumbnailer(object):
+ 
+             if os.path.isfile(thumbpath):
+                 # Check the thumbnail's stored mTime
+                 try:
+-                    img = Image.open(thumbpath)
+-                except IOError:
++                    with Image.open(thumbpath) as img:
++                        stored_mtime = int(float(img.info['Thumb::MTime']))
++                        thumbnail_size = max(*img.size)
++                except (OSError, KeyError, TypeError, ValueError):
+                     return False
+ 
+-                info = img.info
+-                stored_mtime = int(float(info['Thumb::MTime']))
+                 # The source file might no longer exist
+                 file_mtime = os.path.isfile(filepath) and int(os.stat(filepath).st_mtime) or stored_mtime
+                 return stored_mtime == file_mtime and \
+-                    max(*img.size) == max(self.width, self.height)
++                    thumbnail_size == max(self.width, self.height)
+             else:
+                 return False
+         else:
+             return False

@@ -1,3 +1,10 @@
+mcomix (3.2.0-2) unstable; urgency=medium
+
+  * Add 02_ignore_invalid_cached_thumbnails.patch to regenerate thumbnails
+    whose cache metadata is missing or invalid.
+
+ -- Jannik Winkel <jannik.winkel@kiney.de>  Fri, 04 Sep 2026 18:22:00 +0200
+
 mcomix (3.2.0-1) unstable; urgency=medium
 
   * New upstream release.

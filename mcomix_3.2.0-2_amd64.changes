@@ -1,0 +1,26 @@
+Format: 1.8
+Date: Fri, 04 Sep 2026 18:22:00 +0200
+Source: mcomix
+Binary: mcomix
+Architecture: all
+Version: 3.2.0-2
+Distribution: unstable
+Urgency: medium
+Maintainer: Emfox Zhou <emfox@debian.org>
+Changed-By: Jannik Winkel <jannik.winkel@kiney.de>
+Description:
+ mcomix     - GTK+ image viewer for comic books
+Changes:
+ mcomix (3.2.0-2) unstable; urgency=medium
+ .
+   * Add 02_ignore_invalid_cached_thumbnails.patch to regenerate thumbnails
+     whose cache metadata is missing or invalid.
+Checksums-Sha1:
+ 6ca356ef2904735a2bc1b9e96e1fe000fdd983c4 446028 mcomix_3.2.0-2_all.deb
+ 442411ef9bd5b124468b377e454417c9ae083d35 4776 mcomix_3.2.0-2_amd64.buildinfo
+Checksums-Sha256:
+ 80a57ee4bfbb418973325a60684e97b6bd57eca8fa72633baa789ae66a96bc30 446028 mcomix_3.2.0-2_all.deb
+ 4a5a3ce4542bae5d5ec18bed27611cbfe4a170f843b7687fd31dcb27a4a6c44e 4776 mcomix_3.2.0-2_amd64.buildinfo
+Files:
+ a698c6ebc983588f9a817966e95a5347 446028 x11 optional mcomix_3.2.0-2_all.deb
+ ba3834f99c26b64cc1118c81a6e77b62 4776 x11 optional mcomix_3.2.0-2_amd64.buildinfo
