@@ -325,7 +325,7 @@ class _PreferencesDialog(Gtk.Dialog):
 
         page.add_row(Gtk.Label(label=_('Magnifying lens size (in pixels):')),
             self._create_pref_spinner('lens size',
-            1, 50, 400, 1, 10, 0,
+            1, 50, 2000, 1, 10, 0,
             _('Set the size of the magnifying lens. It is a square with a side of this many pixels.')))
 
         page.add_row(Gtk.Label(label=_('Magnification factor:')),

@@ -1,0 +1,20 @@
+Description: Increase the maximum magnifying lens size to 2000 pixels
+ Allow users to select larger magnifying lenses when their display and
+ hardware can accommodate the additional rendering work.
+Author: Jannik Winkel <jannik.winkel@kiney.de>
+Forwarded: no
+Last-Update: 2026-09-04
+
+Index: mcomix-3.2.0/mcomix/preferences_dialog.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/preferences_dialog.py	2026-08-20 11:16:25.798536800 +0200
++++ mcomix-3.2.0/mcomix/preferences_dialog.py	2026-09-04 18:33:42.950770628 +0200
+@@ -325,7 +325,7 @@
+ 
+         page.add_row(Gtk.Label(label=_('Magnifying lens size (in pixels):')),
+             self._create_pref_spinner('lens size',
+-            1, 50, 400, 1, 10, 0,
++            1, 50, 2000, 1, 10, 0,
+             _('Set the size of the magnifying lens. It is a square with a side of this many pixels.')))
+ 
+         page.add_row(Gtk.Label(label=_('Magnification factor:')),

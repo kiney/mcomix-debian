@@ -1,3 +1,10 @@
+mcomix (3.2.0-3) unstable; urgency=medium
+
+  * Add 03_increase_magnifying_lens_size_limit.patch to allow magnifying
+    lenses up to 2000 pixels.
+
+ -- Jannik Winkel <jannik.winkel@kiney.de>  Fri, 04 Sep 2026 18:34:00 +0200
+
 mcomix (3.2.0-2) unstable; urgency=medium
 
   * Add 02_ignore_invalid_cached_thumbnails.patch to regenerate thumbnails

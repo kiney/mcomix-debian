@@ -1,2 +1,3 @@
 01_fix_ftbfs.patch
 02_ignore_invalid_cached_thumbnails.patch
+03_increase_magnifying_lens_size_limit.patch
