@@ -1,3 +1,14 @@
+mcomix (3.2.0-5) unstable; urgency=medium
+
+  * Add 06_support_unrar_free.patch with a checked unrar-free >= 0.3.0
+    fallback for RAR4 and RAR5, including sequential solid RAR5 extraction.
+    Prefer 7z only when its RAR3 and RAR5 decoders are available; remove
+    repeated startup warnings for unrar-free symlinks.
+  * Suggest unrar-free as an alternative RAR extractor.
+  * Include the existing preferences persistence patch in this build.
+
+ -- Jannik Winkel <jannik.winkel@kiney.de>  Fri, 02 Oct 2026 01:00:00 +0200
+
 mcomix (3.2.0-4) unstable; urgency=medium
 
   * Add 04_add_ai_image_tools.patch with configurable OpenAI-compatible

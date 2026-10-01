@@ -20,6 +20,21 @@ and a handful of focused local patches. It is not a separate MComix fork.
   are reversible session-only page overrides.
 - `05_persist_preferences_on_dialog_close.patch` saves changed preferences as
   soon as the Preferences dialog closes, including the AI configuration.
+- `06_support_unrar_free.patch` adds a checked adapter for `unrar-free >= 0.3.0`.
+  It reads RAR4/RAR5 listings and extracts selected members in sequential batches,
+  including solid RAR5. Files are published only after data lengths and the
+  extractor's exit status have been checked. RARLabs extractors and 7z with
+  RAR3/RAR5 decoders retain priority; Debian's 7z without its optional RAR
+  codecs no longer masks the free fallback. Startup no longer warns about
+  `unrar-free` symlinks.
+
+The free fallback inherits libarchive's limitations: encrypted RAR and solid
+RAR4 require `unrar`, `libunrar`, or 7z with RAR codecs. Ambiguous newline-bearing
+names, conflicting sanitized names, and inconsistent data streams fail explicitly
+instead of producing empty or damaged images. The adapter's tests include real
+libarchive 3.7.4 RAR fixtures (license retained under `tests/fixtures/`) and can be
+run with `python3 -m unittest discover -s tests -p test_unrar_free.py` inside the
+source directory. The original upstream tarball remains unchanged.
 
 ## AI feature demo
 

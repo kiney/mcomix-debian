@@ -3,3 +3,4 @@
 03_increase_magnifying_lens_size_limit.patch
 04_add_ai_image_tools.patch
 05_persist_preferences_on_dialog_close.patch
+06_support_unrar_free.patch

@@ -14,6 +14,7 @@ from mcomix.i18n import _
 
 # Filled on-demand by SevenZipArchive
 _7z_executable = -1
+_7z_rar_available = None
 
 
 class SevenZipArchive(archive_base.ExternalExecutableArchive):
@@ -198,6 +199,36 @@ class SevenZipArchive(archive_base.ExternalExecutableArchive):
     @staticmethod
     def is_available():
         return bool(SevenZipArchive._find_7z_executable())
+
+
+class RarArchive(SevenZipArchive):
+    """Prefer 7z for RAR only when its optional RAR decoders are installed."""
+
+    @staticmethod
+    def is_available():
+        global _7z_rar_available
+        if _7z_rar_available is None:
+            _7z_rar_available = False
+            exe = SevenZipArchive._find_7z_executable()
+            if exe:
+                try:
+                    result = subprocess.run(
+                        [exe, 'i'], stdin=process.NULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=5,
+                        creationflags=process._get_creationflags())
+                    parts = result.stdout.split(b'Codecs:', 1)
+                    codecs = parts[1] if len(parts) == 2 else b''
+                    codecs = codecs.split(b'Hashers:', 1)[0]
+                    decoders = set()
+                    for line in codecs.splitlines():
+                        fields = line.split()
+                        if len(fields) >= 4 and b'D' in fields[1]:
+                            decoders.add(fields[-1])
+                    _7z_rar_available = (result.returncode == 0
+                                         and {b'Rar3', b'Rar5'} <= decoders)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        return _7z_rar_available
 
 
 class TarArchive(SevenZipArchive):

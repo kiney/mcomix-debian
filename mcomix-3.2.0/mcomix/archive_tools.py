@@ -18,6 +18,7 @@ from mcomix.archive import (
     rar_external,
     sevenzip_external,
     tar,
+    unrar_free,
     zip,
     zip_external,
 )
@@ -50,7 +51,11 @@ _HANDLERS = {
     constants.RAR: (
         rar.RarArchive,
         rar_external.RarArchive,
-        # Last resort: some versions of 7z support RAR.
+        # Prefer RAR-capable 7z over the more limited libarchive fallback.
+        sevenzip_external.RarArchive,
+        # libarchive has no RAR encryption or RAR4 solid support.
+        unrar_free.UnrarFreeArchive,
+        # A 7z without RAR codecs can still read stored RAR members.
         sevenzip_external.SevenZipArchive,
     ),
     # Prefer 7z over lha executable for Unicode support.

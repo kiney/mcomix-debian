@@ -1,0 +1,708 @@
+Description: Support libarchive-based unrar-free as a checked RAR fallback
+ Add a separate adapter for unrar-free >= 0.3.0, preserving member names and
+ sizes and checking stdout lengths and process status before publishing files.
+ Use sequential batches for solid RAR5; suppress directory creation by print.
+ Prefer 7z only if RAR3/RAR5 decoders are present, since Debian's free 7z can
+ list RAR archives without being able to decompress their members. Preserve
+ RARLabs and fully capable 7z priority, and remove unrar-free startup warnings.
+ Include real RAR regression fixtures from libarchive 3.7.4, with its license.
+Author: Jannik Winkel <jannik.winkel@kiney.de>
+Forwarded: no
+Last-Update: 2026-10-02
+Index: mcomix-3.2.0/mcomix/archive/rar_external.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/archive/rar_external.py	2023-09-08 06:45:47.370230400 +0200
++++ mcomix-3.2.0/mcomix/archive/rar_external.py	2026-10-02 01:01:54.000000000 +0200
+@@ -181,11 +181,9 @@
+                     return True
+             else:
+                 def is_not_unrar_free(exe):
+-                    real_exe = exe
+-                    while os.path.islink(real_exe):
+-                        real_exe = os.readlink(real_exe)
++                    real_exe = os.path.realpath(exe)
+                     if real_exe.endswith(os.path.sep + 'unrar-free'):
+-                        log.warning('RAR executable %s is unrar-free, ignoring', exe)
++                        log.debug('Using separate handler for unrar-free: %s', exe)
+                         return False
+                     return True
+             _rar_executable = process.find_executable(('unrar-nonfree', 'unrar', 'rar'),
+Index: mcomix-3.2.0/mcomix/archive/unrar_free.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/mcomix/archive/unrar_free.py	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,223 @@
++"""RAR fallback for the libarchive-based unrar-free (0.3.0 or newer).
++
++Its human-readable listing has neither solid nor encryption flags. Always
++use a sequential pass, and check the process status before publishing files.
++RAR encryption and RAR4 solid archives need one of the preferred handlers.
++"""
++
++import os
++import re
++import subprocess
++import tempfile
++
++from mcomix import process
++from mcomix.archive import archive_base
++
++
++_unrar_free_executable = -1
++
++
++class UnrarFreeArchive(archive_base.ExternalExecutableArchive):
++    support_concurrent_extractions = False
++
++    _separator = b'-' * 46
++    _metadata = re.compile(
++        rb' {12}\s*(\d+) \d{2}-\d{2}-\d{2} \d{2}:\d{2}   ([.A-Z]{6})')
++    _summary = re.compile(rb'\s*(\d+)\s+(\d+)\s*')
++
++    def __init__(self, archive):
++        super().__init__(archive)
++        self._contents = []
++
++    @staticmethod
++    def _find_executable():
++        global _unrar_free_executable
++        if _unrar_free_executable == -1:
++            def supported(exe):
++                try:
++                    result = subprocess.run(
++                        [exe, '--version'], stdin=process.NULL,
++                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
++                        timeout=5, creationflags=process._get_creationflags())
++                except (OSError, subprocess.TimeoutExpired):
++                    return False
++                version = re.search(rb'\bunrar-free (\d+)\.(\d+)\.(\d+)',
++                                    result.stdout)
++                return (result.returncode == 0 and version is not None
++                        and tuple(map(int, version.groups())) >= (0, 3, 0))
++
++            _unrar_free_executable = process.find_executable(
++                ('unrar-free', 'unrar'), is_valid_candidate=supported)
++        return _unrar_free_executable
++
++    @staticmethod
++    def is_available():
++        return bool(UnrarFreeArchive._find_executable())
++
++    def _get_executable(self):
++        return self._find_executable()
++
++    def is_solid(self):
++        # The listing cannot distinguish solid archives; avoid repeated scans.
++        return True
++
++    def _arguments(self, command):
++        # -ep also prevents unrar-free's print command from creating directory
++        # entries in the working directory. -p- prevents terminal prompting.
++        args = [self._get_executable(), command, '-p-', '-ep']
++        if command == 'p':
++            args.append('-inul')
++        return args + ['--', os.path.abspath(self.archive)]
++
++    @staticmethod
++    def _environment():
++        env = os.environ.copy()
++        env['LC_ALL'] = 'C.UTF-8'
++        return env
++
++    def _error(self, detail):
++        return OSError(
++            'unrar-free could not read %s: %s. Encrypted RAR and RAR4 solid '
++            'archives require unrar/libunrar or a RAR-capable 7z.'
++            % (self.archive, detail))
++
++    def _parse_listing(self, output):
++        # Parse complete name/metadata pairs, preserving leading/trailing spaces.
++        # A newline in a name makes this format ambiguous: fail rather than
++        # extracting the wrong member. Also validate the footer count/size.
++        lines = output.split(b'\n')
++        try:
++            start = lines.index(b'Pathname/Comment')
++            start = lines.index(self._separator, start) + 1
++        except ValueError:
++            raise self._error('unrecognized listing format')
++        entries = []
++        count = total = 0
++        while start < len(lines) and lines[start] != self._separator:
++            if start + 1 >= len(lines) or not lines[start].startswith(b' '):
++                raise self._error('ambiguous member name in listing')
++            metadata = self._metadata.fullmatch(lines[start + 1])
++            if metadata is None:
++                raise self._error('ambiguous member name or metadata in listing')
++            size = int(metadata[1])
++            count += 1
++            total += size
++            if b'D' not in metadata[2]:
++                try:
++                    name = lines[start][1:].decode('utf-8')
++                except UnicodeDecodeError:
++                    raise self._error('member name is not UTF-8')
++                entries.append((name, size))
++            start += 2
++        if start + 1 >= len(lines):
++            raise self._error('incomplete listing')
++        summary = self._summary.fullmatch(lines[start + 1])
++        if summary is None or tuple(map(int, summary.groups())) != (count, total):
++            raise self._error('incomplete listing')
++        return entries
++
++    def iter_contents(self):
++        if self.filenames_initialized:
++            yield from (name for name, _ in self._contents)
++            return
++        if not self._get_executable():
++            raise self._error('no supported executable found')
++        result = subprocess.run(
++            self._arguments('l'), stdin=process.NULL, stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE, env=self._environment(),
++            creationflags=process._get_creationflags())
++        if result.returncode:
++            raise self._error(result.stderr.decode('utf-8', 'replace').strip()
++                              or 'listing failed')
++        entries = self._parse_listing(result.stdout)
++        contents = []
++        mapping = {}
++        for original, size in entries:
++            safe = self._replace_invalid_filesystem_chars(original)
++            if not safe or safe in mapping:
++                raise self._error('empty or conflicting member names')
++            # unrar-free normalizes backslashes before comparing member names.
++            mapping[safe] = original.replace('\\', '/')
++            contents.append((safe, size))
++        self.unicode_mapping = mapping
++        self._contents = contents
++        self.filenames_initialized = True
++        yield from (name for name, _ in contents)
++
++    def extract(self, filename, destination_dir):
++        # Use the same checked extraction path for individual members.
++        for _ in self.iter_extract([filename], destination_dir):
++            pass
++
++    def iter_extract(self, entries, destination_dir):
++        if not self.filenames_initialized:
++            self.list_contents()
++        wanted = set(entries)
++        known = {name for name, _ in self._contents}
++        if not wanted <= known:
++            raise self._error('requested member is not in the listing')
++        if not wanted:
++            return
++        # unrar-free compares names literally, without wildcard expansion.
++        # Restrict stdout to selected members: symlinks can produce bytes even
++        # though the listing advertises size zero. Bound argv for large comics.
++        batches = []
++        batch = []
++        argument_size = 0
++        for name, size in self._contents:
++            if name not in wanted:
++                continue
++            cost = len(self._original_filename(name).encode('utf-8')) + 1
++            if batch and argument_size + cost > 32768:
++                batches.append(batch)
++                batch = []
++                argument_size = 0
++            batch.append((name, size))
++            argument_size += cost
++        batches.append(batch)
++        staged = []
++        try:
++            for batch in batches:
++                args = self._arguments('p') + [self._original_filename(name)
++                                               for name, _ in batch]
++                # A full stderr pipe must not block stdout.
++                with tempfile.TemporaryFile() as errors:
++                    proc = subprocess.Popen(
++                        args, stdin=process.NULL, stdout=subprocess.PIPE,
++                        stderr=errors, env=self._environment(),
++                        creationflags=process._get_creationflags())
++                    try:
++                        for name, size in batch:
++                            target = os.path.join(destination_dir, name)
++                            self._create_directory(os.path.dirname(target))
++                            with tempfile.NamedTemporaryFile(
++                                    dir=os.path.dirname(target),
++                                    prefix='.mcomix-unrar-', delete=False) as output:
++                                staged.append((name, output.name, target))
++                                remaining = size
++                                while remaining:
++                                    data = proc.stdout.read(min(remaining, 65536))
++                                    if not data:
++                                        raise self._error('truncated member data')
++                                    remaining -= len(data)
++                                    output.write(data)
++                        if proc.stdout.read(1):
++                            raise self._error('unexpected trailing member data')
++                        if proc.wait():
++                            errors.seek(0)
++                            raise self._error(
++                                errors.read().decode('utf-8', 'replace').strip()
++                                or 'extraction failed')
++                    finally:
++                        proc.stdout.close()
++                        if proc.poll() is None:
++                            proc.kill()
++                        proc.wait()
++            # Publish only once every batch has passed length and status checks.
++            for name, temporary, target in staged:
++                os.replace(temporary, target)
++                yield name
++        finally:
++            for _, temporary, _ in staged:
++                if os.path.exists(temporary):
++                    os.unlink(temporary)
+Index: mcomix-3.2.0/mcomix/archive_tools.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/archive_tools.py	2023-09-08 06:45:47.370230400 +0200
++++ mcomix-3.2.0/mcomix/archive_tools.py	2026-10-02 01:01:54.000000000 +0200
+@@ -18,6 +18,7 @@
+     rar_external,
+     sevenzip_external,
+     tar,
++    unrar_free,
+     zip,
+     zip_external,
+ )
+@@ -50,7 +51,11 @@
+     constants.RAR: (
+         rar.RarArchive,
+         rar_external.RarArchive,
+-        # Last resort: some versions of 7z support RAR.
++        # Prefer RAR-capable 7z over the more limited libarchive fallback.
++        sevenzip_external.RarArchive,
++        # libarchive has no RAR encryption or RAR4 solid support.
++        unrar_free.UnrarFreeArchive,
++        # A 7z without RAR codecs can still read stored RAR members.
+         sevenzip_external.SevenZipArchive,
+     ),
+     # Prefer 7z over lha executable for Unicode support.
+Index: mcomix-3.2.0/tests/fixtures/COPYING.libarchive
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/COPYING.libarchive	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,29 @@
++RAR test fixtures from libarchive 3.7.4:
++https://github.com/libarchive/libarchive/tree/v3.7.4/libarchive/test
++
++The RAR5 fixtures are also Copyright (c) 2018 Grzegorz Antoniak.
++
++Copyright (c) 2003-2007 Tim Kientzle
++Copyright (c) 2011 Andres Mejia
++Copyright (c) 2011-2012 Michihiro NAKAJIMA
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions
++are met:
++1. Redistributions of source code must retain the above copyright
++   notice, this list of conditions and the following disclaimer.
++2. Redistributions in binary form must reproduce the above copyright
++   notice, this list of conditions and the following disclaimer in the
++   documentation and/or other materials provided with the distribution.
++
++THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
++IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
++INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Index: mcomix-3.2.0/tests/fixtures/test_read_format_rar.rar.uu
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/test_read_format_rar.rar.uu	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,11 @@
++begin 644 test_read_format_rar.rar
++M4F%R(1H'`,^0<P``#0````````"$4G0@D#(`%````!0````#0J+(OK=VVCX4
++M,`@`I($``'1E<W0N='AT@`BW=MH^MW;:/G1E<W0@=&5X="!D;V-U;65N=`T*
++MG2]T()`R``@````(`````WM$R;;13-@^%#`(`/^A``!T97-T;&EN:\`(T4S8
++M/E!?VCYT97-T+G1X=,W@=""0.@`4````%`````-"HLB^8W?:/A0P$`"D@0``
++M=&5S=&1I<EQT97-T+G1X=,#,8W?:/F-WVCYT97-T('1E>'0@9&]C=6UE;G0-
++M"J'(=."0,0````````````,`````8W?:/A0P!P#M00``=&5S=&1I<L#,8W?:
++M/F1WVC[FYW3@D#8````````````#`````)VKU3X4,`P`[4$``'1E<W1E;7!T
++5>61I<H#,G:O5/L5=VC[$/7L`0`<`
++`
++end
+Index: mcomix-3.2.0/tests/fixtures/test_read_format_rar5_compressed.rar.uu
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/test_read_format_rar5_compressed.rar.uu	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,13 @@
++begin 644 test_read_format_rar5_compressed.rar
++M4F%R(1H'`0#SX8+K"P$%!P`&`0&`@(``B<9?VB8"`POI`@2P":2#`LUPRGR`
++M!0$(=&5S="YB:6X*`Q.+5ZQ;^!BM'LKT90$G96!4'U5V7;^4DG')SV6660QP
++MV663&,62$X9"223AD)"2220DXY))(0A))"$)))"22$(2$LVU;WM],PZ`?1T#
++MKC^>NI_W0?[WVO?=>:\Z7^@`0`$`R""?GX]O7T\O'O[NSKZNGHY^7DX^+AX-
++M_=W-K9U];5U-/2T,_-S,K)R,?&Q<3#P;^]O+NYN+>VM;2SLK&OKJVKJJFGI:
++M2CHJ&@GYV<FYF7EI232R4C(1Z%`?CHR*B8<Z<-FH:$@H!^?'MZ>'9T<W)Q;V
++MUK:6=E8V%?75M95U53(3?U_(_0)3Z)3G^$2718HP9Y87:C@IIBF4%^9"T7:=
++M1C+#.,"H1_^@E,9I"E]E4*Q65@N+`9%H-RX'=>$&P`\Q!(R">9A6-`NFH9;8
++M-YN'@X!@<@^N81.@IG88#P-MZ'N]AU?0C?Q80(T8,><*'DT)@V+XX.8Z'"($
++?J>&%%CMC0_GQ4(!L(0T(A-(QG)`O)0`==U91`P4$````
++`
++end
+Index: mcomix-3.2.0/tests/fixtures/test_read_format_rar5_multiple_files_solid.rar.uu
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/test_read_format_rar5_multiple_files_solid.rar.uu	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,19 @@
++begin 644 test_read_format_rar5_multiple_files_solid.rar
++M4F%R(1H'`0`)[\AO"P$%!P0&`0&`@(``&8R4_R<"`POY`@2`(*2#`L:R$WZ`
++M'0$)=&5S=#$N8FEN"@,39U^L6QI:GA#)YW4!&&5492;T@%?U\^?/DDDDDDDD
++MDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDO\\YG#6M
++MEU>^U%T\J3G5RSM\>Y[K?1K,SKP\_'=-M[V;Z=_QC-9YYK#.K,Z<_!W``(`(
++M`;##?S\>_N[>SKZNGHY^;EY./BX>#?WMW<V]K9V-?6U=33TM'0S\[-S,O*R<
++MC'QL7$P\+!P+^^O;R[NKFXM[:UM+.RL;"OKJVLJZJIJ*>FI:2CHJ&@GYZ=G)
++MN:F9B7EI64DY*1D(^.C8R+BHF(AX:%A(."@8!_?GU\>WIY>/__O[_/W[V8]@
++MIG"F6O5\HHC7\D(6UP%MQ8#$T:+90ED3*`YM@Q@Q-FR(B6D(6UP%^8L!B:-%
++MLH2R)E`<_(,8,3;R1$2TA"VN`OQ%@,31HME"61,H#GX!C!B;>"(B6D(6UP%]
++MXL!B:-%LH2R)E`:8=>%?F.N5]]Q:OIMZKYB^ISUY3E[BG(VOBL7^`#MSXI$G
++M`@,+F0`$@""D@P++KV;QP!T!"71E<W0R+F)I;@H#$WI?K%LM5',700T6<``@
++M`@!J7\?WN>#%ZG\PZ\._C^7^`):4S(<G`@,+J@`$@""D@P+9([&?P!T!"71E
++M<W0S+F)I;@H#$WY?K%O0/0`#0#TG<``@`@!MU_']\P_O30\K*!](8[@A](8[
++M@A](8[@A[F'7AW\?R_P`C7A3;"<"`PN9``2`(*2#`M0^Q!#`'0$)=&5S=#0N
++M8FEN"@,3@5^L6Z$F'1)"#A9P`"`"`&V7\?WL\&+V/YAUX=_'\O\`'7=640,%
++"!```
++`
++end
+Index: mcomix-3.2.0/tests/fixtures/test_read_format_rar5_unicode.rar.uu
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/test_read_format_rar5_unicode.rar.uu	2026-10-02 01:03:58.589351750 +0200
+@@ -0,0 +1,9 @@
++begin 0744 test_read_format_rar5_unicode.rar
++M4F%R(1H'`0#SX8+K"P$%!P`&`0&`@(``//TR$"@"`PN-``2-`"#FQN;K@```
++M#/"?D8OPGXR.+G1X=`H#`D:)>%;RZ]D!2&5L;&\L('=O<FQD(2/9BPA(`@,<
++M``0-(`````"````=XI*]XI.0XI.AXI.3(.*3@>*3F.*3G>*3FBYT>'0*`P)&
++MB7A6\NO9`1`%!``,\)^1B_"?C(XN='ATD-'.1V$"`QP`!`"@"`````"````U
++M\)V2KO"=DX[PG9."\)V2M_"=D9SPG9.!\)V2OO"=DK@@\)V0O_"=DK[PG9.#
++L\)V3@"YT>'0*`P(>7'J>!.S9`1`%`@`,\)^1B_"?C(XN='AT'7=640,%!```
++`
++end
+Index: mcomix-3.2.0/tests/fixtures/test_read_format_rar_encryption_data.rar.uu
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/test_read_format_rar_encryption_data.rar.uu	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,8 @@
++begin 664 test_read_format_rar_encryption_data.rar
++M4F%R(1H'`,^0<P``#0````````!=_'0DA"\`(````!`````#7(:MIJ5,,4,=
++M,P<`M($``&9O;RYT>'1/`[S9UA9,WT5`&I*2B-\5*XZ>SW"Y0.C)1^;.UK]$
++MXK@UJ)SH93<!!T5T)(0O`"`````0`````[[BD,VF3#%#'3,'`+2!``!B87(N
++M='AT3P.\V=863-]P='I(B8@/9EM]Y0:Y<AZH)57XRC<!H^WT\13S(V31H<0]
++%>P!`!P``
++`
++end
+Index: mcomix-3.2.0/tests/fixtures/test_read_format_rar_encryption_header.rar.uu
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/fixtures/test_read_format_rar_encryption_header.rar.uu	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,8 @@
++begin 664 test_read_format_rar_encryption_header.rar
++M4F%R(1H'`,Z9<X``#0````````#C+JMDIUQVC(1'0@#+RLR?%V>1EQMQ=@1S
++M,[$:0Y\;'G8_C0D%2L":*;.B*LM0!,!.2!RBU?+`DTN9KXD\<4RGSC<K5.$U
++M5ZP^2+6",C4`Q^N*MW0)<$U,XRZK9*=<=HRJEM_P8GIN:*4ZDP<>+#KCC:\R
++M$)P&_/D2I'(4,7$^#2[\,Y"D.2T$@B1#J-Z$]R6_*($W7+!JH\,(XH,'C7FC
++H@B,\$1>+CX-=`-%F3C6%I^,NJV2G7':,JF?4KS:6=TAK%$V=]2+N^@``
++`
++end
+Index: mcomix-3.2.0/tests/test_unrar_free.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ mcomix-3.2.0/tests/test_unrar_free.py	2026-10-02 01:01:54.000000000 +0200
+@@ -0,0 +1,240 @@
++import binascii
++import os
++from pathlib import Path
++import struct
++import subprocess
++import tempfile
++import unittest
++from unittest import mock
++import zlib
++
++import gi
++gi.require_version('Gtk', '3.0')
++
++from mcomix.archive import rar_external, sevenzip_external, unrar_free
++from mcomix.archive.unrar_free import UnrarFreeArchive
++
++
++FIXTURES = Path(__file__).parent / 'fixtures'
++
++
++def fixture(name, directory):
++    """Decode libarchive 3.7.4 fixtures; license in COPYING.libarchive."""
++    lines = (FIXTURES / (name + '.uu')).read_bytes().splitlines()
++    start = next(i for i, line in enumerate(lines) if line.startswith(b'begin '))
++    data = b''.join(binascii.a2b_uu(line) for line in lines[start + 1:]
++                    if line and line != b'end')
++    path = Path(directory) / name
++    path.write_bytes(data)
++    return str(path)
++
++
++def stored_rar(path, entries, solid=False):
++    """Create small RAR4 stored members to exercise unusual names/errors."""
++    def header(kind, flags, payload):
++        data = struct.pack('<BHH', kind, flags, 7 + len(payload)) + payload
++        return struct.pack('<H', zlib.crc32(data) & 0xffff) + data
++
++    data = b'Rar!\x1a\x07\x00' + header(0x73, 8 if solid else 0, b'\0' * 6)
++    for name, content in entries:
++        encoded = name.encode('ascii')
++        directory = name.endswith('/')
++        flags = 0x8000 | (0xe0 if directory else 0)
++        if solid and name.startswith('page2'):
++            flags |= 0x10
++        payload = struct.pack('<IIBIIBBHI', len(content), len(content), 3,
++                              zlib.crc32(content), 0, 20, 0x30,
++                              len(encoded), 0o40755 if directory else 0o100644)
++        data += header(0x74, flags, payload + encoded) + content
++    data += header(0x7b, 0, b'')
++    Path(path).write_bytes(data)
++    return str(path)
++
++
++class DetectionTest(unittest.TestCase):
++    def test_7z_formats_alone_do_not_mean_rar_decoders_are_present(self):
++        for codecs, expected in [(b'0 D 40303 Rar3\n0 D 40305 Rar5\n', True),
++                                  (b'0 ED 21 LZMA2\n', False)]:
++            info = b'Formats:\n0 ...F... Rar rar\nCodecs:\n' + codecs
++            with self.subTest(codecs=codecs), \
++                    mock.patch.object(sevenzip_external, '_7z_rar_available', None), \
++                    mock.patch.object(sevenzip_external, '_7z_executable', '/7z'), \
++                    mock.patch.object(sevenzip_external.subprocess, 'run') as run:
++                run.return_value = subprocess.CompletedProcess([], 0, info, b'')
++                self.assertEqual(sevenzip_external.RarArchive.is_available(), expected)
++
++    def test_nonfree_handler_skips_relative_symlink_without_warning(self):
++        with tempfile.TemporaryDirectory() as directory:
++            real = Path(directory) / 'unrar-free'
++            real.write_text('#!/bin/sh\nexit 0\n')
++            real.chmod(0o755)
++            (Path(directory) / 'unrar').symlink_to('unrar-free')
++            with mock.patch.dict(os.environ, {'PATH': directory}), \
++                    mock.patch.object(rar_external, '_rar_executable', -1), \
++                    mock.patch.object(rar_external.log, 'warning') as warning:
++                self.assertFalse(rar_external.RarArchive.is_available())
++                warning.assert_not_called()
++
++    def test_free_handler_rejects_old_or_nonfree_versions(self):
++        for version, expected in [(b'unrar-free 0.3.1', True),
++                                  (b'unrar-free 0.1.3', False),
++                                  (b'UNRAR 7.0', False)]:
++            with self.subTest(version=version), \
++                    mock.patch.object(unrar_free, '_unrar_free_executable', -1), \
++                    mock.patch.object(unrar_free.subprocess, 'run') as run, \
++                    mock.patch.object(unrar_free.process, 'find_executable') as find:
++                run.return_value = subprocess.CompletedProcess([], 0, version, b'')
++                find.side_effect = lambda candidates, is_valid_candidate: (
++                    '/unrar' if is_valid_candidate('/unrar') else None)
++                self.assertEqual(UnrarFreeArchive.is_available(), expected)
++
++
++@unittest.skipUnless(UnrarFreeArchive.is_available(), 'requires unrar-free >= 0.3.0')
++class UnrarFreeRuntimeTest(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        self.root = Path(self.directory.name)
++        self.out = self.root / 'out'
++
++    def archive(self, name):
++        return UnrarFreeArchive(fixture(name, self.root))
++
++    def test_rar4_directories_and_single_extraction(self):
++        archive = self.archive('test_read_format_rar.rar')
++        names = archive.list_contents()
++        self.assertIn('test.txt', names)
++        self.assertIn('testdir/test.txt', names)
++        self.assertNotIn('testdir', names)
++        self.assertEqual(archive.list_contents(), names)
++        archive.extract('testdir/test.txt', str(self.out))
++        self.assertEqual((self.out / 'testdir/test.txt').read_bytes(),
++                         b'test text document\r\n')
++        self.assertFalse((self.out / 'test.txt').exists())
++
++    def test_rar5_compressed_contents(self):
++        archive = self.archive('test_read_format_rar5_compressed.rar')
++        names = archive.list_contents()
++        self.assertTrue(names)
++        self.assertEqual(set(archive.iter_extract(names, str(self.out))), set(names))
++        self.assertTrue(all((self.out / name).stat().st_size == size
++                            for name, size in archive._contents))
++
++    def test_rar5_solid_subset_byte_for_byte(self):
++        archive = self.archive('test_read_format_rar5_multiple_files_solid.rar')
++        self.assertEqual(archive.list_contents(),
++                         ['test1.bin', 'test2.bin', 'test3.bin', 'test4.bin'])
++        self.assertTrue(archive.is_solid())
++        self.assertEqual(list(archive.iter_extract(['test2.bin', 'test4.bin'],
++                                                 str(self.out))),
++                         ['test2.bin', 'test4.bin'])
++        for magic in (2, 4):
++            expected = b''.join(struct.pack('<I', max(0, k*k - 3*k + 1 + magic))
++                                for k in range(1, 1025))
++            self.assertEqual((self.out / ('test%d.bin' % magic)).read_bytes(), expected)
++        self.assertFalse((self.out / 'test1.bin').exists())
++
++    def test_unicode_names(self):
++        archive = self.archive('test_read_format_rar5_unicode.rar')
++        names = archive.list_contents()
++        self.assertTrue(any(not name.isascii() for name in names))
++        self.assertEqual(list(archive.iter_extract(names, str(self.out))), names)
++
++    def test_names_spaces_empty_files_and_no_directory_side_effects(self):
++        archive = UnrarFreeArchive(stored_rar(self.root / 'names.rar', [
++            ('sub/', b''), ('sub/ page [1]*.jpg ', b'image data'),
++            ('-page.jpg', b'dash'), ('empty.txt', b'')]))
++        with mock.patch.dict(os.environ, {'LC_ALL': 'C'}):
++            self.assertEqual(archive.list_contents(),
++                             ['sub/ page [1]*.jpg ', '-page.jpg', 'empty.txt'])
++        # A print pass must never create archive directories in its cwd.
++        with mock.patch.object(unrar_free, 'subprocess', wraps=subprocess) as child:
++            child.PIPE = subprocess.PIPE
++            child.Popen.side_effect = lambda *a, **kw: subprocess.Popen(
++                *a, cwd=self.root, **kw)
++            names = archive.list_contents()
++            self.assertEqual(list(archive.iter_extract(names, str(self.out))), names)
++        self.assertFalse((self.root / 'sub').exists())
++        self.assertEqual((self.out / 'sub/ page [1]*.jpg ').read_bytes(), b'image data')
++        self.assertEqual((self.out / 'empty.txt').read_bytes(), b'')
++
++    def test_conflicting_sanitized_names_are_rejected(self):
++        archive = UnrarFreeArchive(stored_rar(self.root / 'collision.rar',
++                                            [('/page.jpg', b'a'), ('page.jpg', b'b')]))
++        with self.assertRaisesRegex(OSError, 'conflicting member names'):
++            archive.list_contents()
++
++    def test_symlink_stream_size_mismatch_is_rejected(self):
++        archive = self.archive('test_read_format_rar.rar')
++        archive.list_contents()
++        with self.assertRaisesRegex(OSError, 'trailing member data'):
++            archive.extract('testlink', str(self.out))
++        self.assertEqual(list(self.out.iterdir()), [])
++
++    def test_large_selection_is_split_into_bounded_batches(self):
++        members = [('page%04d%s.jpg' % (i, 'x' * 100), bytes([i % 256]))
++                   for i in range(310)]
++        archive = UnrarFreeArchive(stored_rar(self.root / 'many.rar', members))
++        names = archive.list_contents()
++        with mock.patch.object(subprocess, 'Popen', wraps=subprocess.Popen) as popen:
++            self.assertEqual(list(archive.iter_extract(names, str(self.out))), names)
++            self.assertEqual(popen.call_count, 2)
++        for name, content in members:
++            self.assertEqual((self.out / name).read_bytes(), content)
++
++    def test_newline_names_are_rejected(self):
++        archive = UnrarFreeArchive(stored_rar(self.root / 'newline.rar',
++                                            [('page\n.jpg', b'a')]))
++        with self.assertRaisesRegex(OSError, 'ambiguous member name'):
++            archive.list_contents()
++
++    def test_encrypted_headers_report_capability_limit(self):
++        archive = self.archive('test_read_format_rar_encryption_header.rar')
++        with self.assertRaisesRegex(OSError, 'encryption|Encrypted'):
++            archive.list_contents()
++        self.assertFalse(archive.filenames_initialized)
++
++    def test_encrypted_data_never_publishes_empty_image(self):
++        archive = self.archive('test_read_format_rar_encryption_data.rar')
++        names = archive.list_contents()
++        with self.assertRaises(OSError):
++            list(archive.iter_extract(names, str(self.out)))
++        self.assertEqual(list(self.out.rglob('*')), [])
++
++    def test_truncated_stream_preserves_existing_file_and_cleans_temps(self):
++        path = self.root / 'truncated.rar'
++        archive = UnrarFreeArchive(stored_rar(path, [('page.jpg', b'image data')]))
++        archive.list_contents()
++        self.out.mkdir()
++        (self.out / 'page.jpg').write_bytes(b'existing image')
++        path.write_bytes(path.read_bytes()[:-20])
++        with self.assertRaises(OSError):
++            archive.extract('page.jpg', str(self.out))
++        self.assertEqual((self.out / 'page.jpg').read_bytes(), b'existing image')
++        self.assertEqual(list(self.out.iterdir()), [self.out / 'page.jpg'])
++
++    def test_nonzero_exit_even_with_complete_data_is_rejected(self):
++        archive = UnrarFreeArchive(stored_rar(self.root / 'status.rar',
++                                            [('page.jpg', b'image data')]))
++        archive.list_contents()
++        # A backend can emit the advertised size and still fail its CRC check.
++        class FailedStatus(subprocess.Popen):
++            def wait(self, *args, **kwargs):
++                super().wait(*args, **kwargs)
++                return 1
++
++        with mock.patch.object(subprocess, 'Popen', FailedStatus):
++            with self.assertRaisesRegex(OSError, 'extraction failed'):
++                archive.extract('page.jpg', str(self.out))
++        self.assertEqual(list(self.out.iterdir()), [])
++
++    def test_unsupported_rar4_solid_is_not_reported_as_empty(self):
++        archive = UnrarFreeArchive(stored_rar(self.root / 'solid.rar',
++                                            [('page1.jpg', b'a'), ('page2.jpg', b'b')],
++                                            solid=True))
++        with self.assertRaisesRegex(OSError, 'solid'):
++            archive.list_contents()
++
++
++if __name__ == '__main__':
++    unittest.main()
+Index: mcomix-3.2.0/mcomix/archive/sevenzip_external.py
+===================================================================
+--- mcomix-3.2.0.orig/mcomix/archive/sevenzip_external.py	2023-09-08 06:45:47.370230400 +0200
++++ mcomix-3.2.0/mcomix/archive/sevenzip_external.py	2026-10-02 01:01:54.000000000 +0200
+@@ -14,6 +14,7 @@
+ 
+ # Filled on-demand by SevenZipArchive
+ _7z_executable = -1
++_7z_rar_available = None
+ 
+ 
+ class SevenZipArchive(archive_base.ExternalExecutableArchive):
+@@ -200,6 +201,36 @@
+         return bool(SevenZipArchive._find_7z_executable())
+ 
+ 
++class RarArchive(SevenZipArchive):
++    """Prefer 7z for RAR only when its optional RAR decoders are installed."""
++
++    @staticmethod
++    def is_available():
++        global _7z_rar_available
++        if _7z_rar_available is None:
++            _7z_rar_available = False
++            exe = SevenZipArchive._find_7z_executable()
++            if exe:
++                try:
++                    result = subprocess.run(
++                        [exe, 'i'], stdin=process.NULL, stdout=subprocess.PIPE,
++                        stderr=subprocess.PIPE, timeout=5,
++                        creationflags=process._get_creationflags())
++                    parts = result.stdout.split(b'Codecs:', 1)
++                    codecs = parts[1] if len(parts) == 2 else b''
++                    codecs = codecs.split(b'Hashers:', 1)[0]
++                    decoders = set()
++                    for line in codecs.splitlines():
++                        fields = line.split()
++                        if len(fields) >= 4 and b'D' in fields[1]:
++                            decoders.add(fields[-1])
++                    _7z_rar_available = (result.returncode == 0
++                                         and {b'Rar3', b'Rar5'} <= decoders)
++                except (OSError, subprocess.TimeoutExpired):
++                    pass
++        return _7z_rar_available
++
++
+ class TarArchive(SevenZipArchive):
+ 
+     '''Special class for handling tar archives.

@@ -181,11 +181,9 @@ class RarArchive(archive_base.ExternalExecutableArchive):
                     return True
             else:
                 def is_not_unrar_free(exe):
-                    real_exe = exe
-                    while os.path.islink(real_exe):
-                        real_exe = os.readlink(real_exe)
+                    real_exe = os.path.realpath(exe)
                     if real_exe.endswith(os.path.sep + 'unrar-free'):
-                        log.warning('RAR executable %s is unrar-free, ignoring', exe)
+                        log.debug('Using separate handler for unrar-free: %s', exe)
                         return False
                     return True
             _rar_executable = process.find_executable(('unrar-nonfree', 'unrar', 'rar'),
